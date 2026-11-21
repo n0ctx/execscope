@@ -1,0 +1,32 @@
+[package]
+name = "execscope"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Inspect the local execution environment and check named prerequisites"
+publish = false
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+libc = "0.2"
+rmcp = { version = "3.11", default-features = false, features = ["server", "transport-io"] }
+semver = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+toml = "0.9"
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+windows-sys = { version = "0.61", features = ["Win32_Devices_Display", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"

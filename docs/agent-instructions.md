@@ -1,0 +1,7 @@
+# Optional instructions for coding agents
+
+Add this to your project's agent instructions if the agent does not use the tool when it needs local environment facts. ExecScope does not install these instructions.
+
+> Before a command whose choice depends on the OS, runtime, package manager, or tool version, call `inspect_environment` with the project `cwd`. Use `requires` for any named tools that the command needs. Check the reported selected version and blockers before choosing commands. A declaration or a discovered executable is not proof that a tool is ready. The report describes the local MCP process, not your interactive shell or a remote target. If the commands will run inside WSL, a container, or an SSH session, run `execscope inspect` inside that environment. Reuse current evidence instead of repeating discovery. Do not request `scope=network` unless you specifically need outbound diagnostics.
+
+Example: for a project declaring pnpm, call `inspect_environment` with `{"cwd":"/work/app","requires":["node","pnpm"]}`. If pnpm is blocked or unverified, inspect the reason rather than substituting npm based on PATH alone.
