@@ -66,6 +66,13 @@ impl Project {
     pub(crate) fn requirements(&self, tool: &str) -> impl Iterator<Item = &Requirement> {
         self.requirements.get(tool).into_iter().flatten()
     }
+    pub(crate) fn python_project_root(&self) -> Option<&Path> {
+        self.workspace_roots
+            .get("python")
+            .or_else(|| self.package_roots.get("python"))
+            .map(PathBuf::as_path)
+    }
+
     pub(crate) fn roots(&self) -> impl Iterator<Item = &Path> {
         self.package_roots
             .values()

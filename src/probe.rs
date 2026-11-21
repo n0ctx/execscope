@@ -68,7 +68,10 @@ pub(crate) async fn verify(name: &str, target: &Path, cwd: &Path, timeout: Durat
 }
 
 #[cfg(windows)]
-pub(crate) async fn verify(_name: &str, target: &Path, _cwd: &Path, _timeout: Duration) -> Probe {
+mod windows;
+
+#[cfg(windows)]
+pub(crate) async fn verify(name: &str, target: &Path, _cwd: &Path, timeout: Duration) -> Probe {
     let Some(mut file) = safe::open_regular(target) else {
         return unknown("candidate_unavailable");
     };
@@ -79,10 +82,35 @@ pub(crate) async fn verify(_name: &str, target: &Path, _cwd: &Path, _timeout: Du
     if !native_image(&bytes[..n]) {
         return unknown("wrapper_or_foreign_image");
     }
-    // A PE resource establishes a file version, not safe execution in the
-    // requested directory. Do not start a child with an unverified DLL search.
+    let file_version = crate::platform::windows::file_version(target);
+    if name == "node" {
+        match windows::identity(target, timeout).await {
+            Ok(version) => {
+                return Probe {
+                    version: Some(version.to_owned()),
+                    file_version,
+                    status: Status::Available,
+                    reason: "identity_verified",
+                    source: "windows_digest_and_contained_identity",
+                };
+            }
+            Err(reason) => {
+                return Probe {
+                    file_version,
+                    status: if reason == "timed_out" {
+                        Status::Timeout
+                    } else {
+                        Status::Unknown
+                    },
+                    source: "native_pe_file_metadata",
+                    ..unknown(reason)
+                };
+            }
+        }
+    }
+    // Metadata does not establish safe runnable identity for other tools.
     Probe {
-        file_version: crate::platform::windows::file_version(target),
+        file_version,
         status: Status::Unsupported,
         source: "native_pe_file_metadata",
         ..unknown("native_image_observed_safe_launch_unavailable")

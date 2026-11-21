@@ -1,4 +1,6 @@
 //! Inspect manager metadata without asking a manager to activate, trust, sync, or install.
+mod selectors;
+
 use crate::{project::Requirement, safe};
 use serde::Serialize;
 use std::{
@@ -35,6 +37,8 @@ pub(crate) struct Managed {
     pub(crate) requested: Option<String>,
     pub(crate) discovered_version: Option<String>,
     pub(crate) version_source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uv_project: Option<selectors::Context>,
 }
 fn opt_path<S: serde::Serializer>(p: &Option<PathBuf>, s: S) -> Result<S::Ok, S::Error> {
     match p {
@@ -180,6 +184,7 @@ pub(crate) fn enrich(
     kind: Option<Kind>,
     reqs: &[Requirement],
     project_roots: &[&Path],
+    python_root: Option<&Path>,
 ) -> Managed {
     let mut r = Managed {
         selected: None,
@@ -190,6 +195,7 @@ pub(crate) fn enrich(
         requested: None,
         discovered_version: None,
         version_source: None,
+        uv_project: None,
     };
     let dirs = std::iter::once(cwd)
         .chain(project_roots.iter().copied())
@@ -223,19 +229,23 @@ pub(crate) fn enrich(
                 python_env(&mut r, &root, "active_env_candidate");
             }
         }
-        if let Some(project_env) =
-            env::var_os("UV_PROJECT_ENVIRONMENT").filter(|s| !s.is_empty() && s.len() <= 4096)
-        {
-            let path = PathBuf::from(project_env);
-            if path.is_absolute() {
-                python_env(&mut r, &path, "uv_environment_candidate");
-            } else if let Some(root) = project_roots.first() {
-                python_env(&mut r, &root.join(path), "uv_environment_candidate");
+        if let Some(root) = python_root {
+            let configured = env::var_os("UV_PROJECT_ENVIRONMENT").filter(|s| s.len() <= 4096);
+            let no_project =
+                env::var("UV_NO_PROJECT").is_ok_and(|s| matches!(s.as_str(), "1" | "true"));
+            let context = selectors::uv_project(root, configured.as_deref(), no_project);
+            if let Some(path) = &context.executable {
+                r.alternate(path.clone());
             }
+            r.uv_project = Some(context);
         }
-        if let Some(python) = env_dir("UV_PYTHON") {
-            r.note("UV_PYTHON_path_present");
-            r.alternate(python);
+        if let Ok(python) = env::var("UV_PYTHON") {
+            if let Some(path) = env_dir("UV_PYTHON") {
+                r.note("UV_PYTHON_path_present");
+                r.alternate(path);
+            } else if !python.is_empty() {
+                r.note("UV_PYTHON_version_request_present");
+            }
         }
         for dir in dirs.clone() {
             let venv = dir.join(".venv");
@@ -324,23 +334,28 @@ pub(crate) fn enrich(
         } else {
             name
         };
-        let override_pin = env::var(format!("ASDF_{}_VERSION", tool.to_ascii_uppercase())).ok();
-        if let Some(pin) = override_pin
-            .as_deref()
-            .or_else(|| declaration(reqs, "asdf"))
-            .and_then(component)
-            .filter(|v| *v != "system")
-        {
-            r.observe(
-                root.join("installs")
-                    .join(tool)
-                    .join(pin)
-                    .join("bin")
-                    .join(file(name)),
-                kind == Some(Kind::Asdf),
-                "asdf_project_or_environment_selection",
-                pin,
-            );
+        if kind == Some(Kind::Asdf) || declaration(reqs, "asdf").is_some() {
+            let key = format!("ASDF_{}_VERSION", tool.to_ascii_uppercase());
+            let filename =
+                env::var("ASDF_TOOL_VERSIONS_FILENAME").unwrap_or_else(|_| ".tool-versions".into());
+            let request = if let Ok(value) = env::var(key) {
+                Ok(Some(value))
+            } else {
+                selectors::asdf_file(cwd, home().as_deref(), &filename, tool)
+            };
+            match request {
+                Ok(Some(pin)) => match selectors::asdf(&root, tool, name, &pin) {
+                    Ok((path, version)) => r.observe(
+                        path,
+                        kind == Some(Kind::Asdf),
+                        "asdf_project_or_environment_selection",
+                        &version,
+                    ),
+                    Err(reason) => r.note(reason),
+                },
+                Ok(None) => r.note("asdf_no_configured_selector_observed"),
+                Err(reason) => r.note(reason),
+            }
         }
     }
     if let Some(root) = store("MISE_DATA_DIR", ".local/share/mise") {
@@ -349,20 +364,56 @@ pub(crate) fn enrich(
         } else {
             name
         };
-        if let Some(pin) = declaration(reqs, "mise")
-            .or_else(|| declaration(reqs, "asdf"))
-            .and_then(component)
-        {
-            let p = root
-                .join("installs")
-                .join(tool)
-                .join(pin)
-                .join("bin")
-                .join(file(name));
-            // mise can take additional config, environment, or plugin selectors; metadata suffices for an alternative.
-            if executable(&p) {
-                r.alternate(p);
-                r.note("mise_installed_candidate_dynamic_selection_unverified");
+        if kind == Some(Kind::Mise) || declaration(reqs, "mise").is_some() {
+            let key = format!("MISE_{}_VERSION", tool.to_ascii_uppercase());
+            let global = env_dir("MISE_CONFIG_DIR")
+                .or_else(|| env_dir("XDG_CONFIG_HOME").map(|p| p.join("mise")))
+                .or_else(|| home().map(|p| p.join(".config/mise")));
+            let request = if let Ok(value) = env::var(key) {
+                Ok(Some((value, "mise_environment_tool_version")))
+            } else if [
+                "MISE_GLOBAL_CONFIG_FILE",
+                "MISE_OVERRIDE_CONFIG_FILENAMES",
+                "MISE_OVERRIDE_TOOL_VERSIONS_FILENAMES",
+                "MISE_CEILING_PATHS",
+                "MISE_IGNORED_CONFIG_PATHS",
+            ]
+            .iter()
+            .any(|k| env::var_os(k).is_some())
+            {
+                Err("mise_config_discovery_override_unverified")
+            } else {
+                selectors::mise_request(
+                    cwd,
+                    global.as_deref(),
+                    &env::var("MISE_ENV").unwrap_or_default(),
+                    tool,
+                )
+            };
+            if let Ok(Some((pin, pin_source))) = &request {
+                match selectors::mise_install(&root, tool, name, pin) {
+                    Ok((path, version)) => {
+                        r.alternate(path);
+                        r.note("mise_matching_install_observed");
+                        r.note(pin_source);
+                        if kind == Some(Kind::Mise) {
+                            r.source = "mise_selector_metadata";
+                            r.requested = Some(crate::project::constraint(pin));
+                            r.record_version(
+                                &version,
+                                "mise_matching_install_not_verified_selected",
+                            );
+                            r.note("mise_dynamic_selection_not_replayed");
+                        }
+                    }
+                    Err(reason) => r.note(reason),
+                }
+            } else {
+                r.note(
+                    request
+                        .err()
+                        .unwrap_or("mise_no_supported_selector_observed"),
+                );
             }
         }
     }
@@ -449,12 +500,9 @@ pub(crate) fn enrich_selected(
         && kind == Kind::PythonEnvironment
         && let Some(root) = entry.parent().and_then(Path::parent)
         && let Some(config) = safe::read(&root.join("pyvenv.cfg"), 8 * 1024)
-        && let Some(version) = config.lines().take(48).find_map(|line| {
-            let (key, val) = line.split_once('=')?;
-            matches!(key.trim(), "version" | "version_info").then_some(val.trim())
-        })
+        && let Some(version) = selectors::pyvenv_version(&config)
     {
-        r.record_version(version, "selected_pyvenv_cfg");
+        r.record_version(&version, "selected_pyvenv_cfg");
     }
     if name != "node" || kind != Kind::Direct {
         return;
@@ -580,34 +628,66 @@ fn rustup(
                 r.note("rustup_directory_override");
                 break;
             }
-            let channel = ["rust-toolchain", "rust-toolchain.toml"]
-                .into_iter()
-                .filter_map(|name| {
-                    let path = dir.join(name);
-                    let resolved = fs::canonicalize(path).ok().filter(|p| p.starts_with(dir))?;
-                    let raw = safe::read(&resolved, 24 * 1024)?;
-                    if let Ok(parsed) = raw.parse::<toml::Table>() {
-                        if parsed
-                            .get("toolchain")
-                            .and_then(|t| t.get("path"))
-                            .is_some()
-                        {
-                            return Some("<path_override>".to_owned());
+            for filename in ["rust-toolchain", "rust-toolchain.toml"] {
+                let path = dir.join(filename);
+                if matches!(fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+                {
+                    continue;
+                }
+                let Some(raw) = fs::canonicalize(path)
+                    .ok()
+                    .filter(|p| p.starts_with(dir))
+                    .and_then(|p| safe::read(&p, 24 * 1024))
+                else {
+                    r.note("rustup_project_file_unreadable");
+                    return false;
+                };
+                if let Some(toolchain) = raw
+                    .parse::<toml::Table>()
+                    .ok()
+                    .and_then(|mut t| t.remove("toolchain"))
+                {
+                    if let Some(path) = toolchain.get("path").and_then(toml::Value::as_str) {
+                        if !Path::new(path).is_absolute() {
+                            r.note("rustup_relative_path_override_unverified");
+                            return false;
                         }
-                        if let Some(channel) = parsed
-                            .get("toolchain")
-                            .and_then(|t| t.get("channel"))
-                            .and_then(toml::Value::as_str)
-                        {
-                            return Some(channel.to_owned());
+                        let selected = Path::new(path).join("bin").join(file(name));
+                        #[cfg(windows)]
+                        if !crate::platform::windows::local(&selected) {
+                            r.note("rustup_path_override_not_local");
+                            return false;
                         }
+                        if executable(&selected) {
+                            r.alternate(selected.clone());
+                            if governing {
+                                r.selected = selected.canonicalize().ok();
+                                r.source = "rustup_local_path_override";
+                            }
+                            r.note("rustup_local_path_override_observed");
+                        } else {
+                            r.note("rustup_path_override_target_not_observed");
+                        }
+                        return false;
                     }
-                    (name == "rust-toolchain").then(|| raw.trim().to_owned())
-                })
-                .next();
-            if channel.is_some() {
-                pin = channel;
+                    pin = toolchain
+                        .get("channel")
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_owned);
+                    if toolchain.get("components").is_some() || toolchain.get("targets").is_some() {
+                        r.note("rustup_may_reconcile_declared_components_or_targets");
+                    }
+                } else if filename == "rust-toolchain" {
+                    pin = component(raw.trim()).map(str::to_owned);
+                }
+                if pin.is_none() {
+                    r.note("rustup_project_selector_unverified");
+                    return false;
+                }
                 r.note("rustup_project_toolchain_file");
+                break;
+            }
+            if pin.is_some() {
                 break;
             }
         }
@@ -748,6 +828,7 @@ mod tests {
             requested: None,
             discovered_version: None,
             version_source: None,
+            uv_project: None,
         }
     }
     #[test]
@@ -810,6 +891,38 @@ mod tests {
         assert_eq!(r.requested.as_deref(), Some("1.92"));
         assert_eq!(r.blocker, Some("required_toolchain_component_unavailable"));
     }
+    #[test]
+    fn rustup_absolute_path_override_is_not_a_default_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let project = root.join("project");
+        let custom = root.join("custom");
+        fs::create_dir(&project).unwrap();
+        let tool = custom.join("bin").join(file("rustc"));
+        fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        fs::write(&tool, "fixture; must not launch").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let config = project.join("rust-toolchain.toml");
+        let value = toml::Value::String(custom.to_string_lossy().to_string());
+        fs::write(&config, format!("[toolchain]\npath = {value}\n")).unwrap();
+        let mut r = new();
+        rustup(&mut r, &root, &project, None, "rustc", true);
+        assert_eq!(r.selected, Some(tool.canonicalize().unwrap()));
+        assert_eq!(r.source, "rustup_local_path_override");
+        fs::write(&config, "[toolchain]\npath = 'relative'\n").unwrap();
+        let mut r = new();
+        rustup(&mut r, &root, &project, None, "rustc", true);
+        assert!(r.selected.is_none());
+        assert!(
+            r.evidence
+                .contains(&"rustup_relative_path_override_unverified")
+        );
+    }
+
     #[test]
     fn corepack_local_cache_transition_does_not_launch_anything() {
         let t = tempfile::tempdir().unwrap();

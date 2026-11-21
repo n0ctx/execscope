@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::task::JoinSet;
 
-const PROBE_LIMIT: Duration = Duration::from_millis(300);
+const PROBE_LIMIT: Duration = Duration::from_millis(if cfg!(windows) { 750 } else { 300 });
 const CACHE_LIMIT: usize = 128;
 
 type ProbeKey = (&'static str, PathBuf, PathBuf, Stamp);
@@ -58,7 +58,12 @@ impl ProbeCache {
         cwd: &Path,
         refresh: bool,
     ) -> (Probe, String, bool) {
-        let key = Stamp::new(path).map(|stamp| (name, path.to_owned(), cwd.to_owned(), stamp));
+        // Windows policy rechecks the DACL and digest before every launch.
+        let key = if cfg!(windows) {
+            None
+        } else {
+            Stamp::new(path).map(|stamp| (name, path.to_owned(), cwd.to_owned(), stamp))
+        };
         if let Some(key) = &key
             && !refresh
             && let Some((_, at, probe)) = self
@@ -368,7 +373,16 @@ async fn resolve(job: Job) -> Fact {
         let chain = work.search.find(name, &work.cwd);
         let selected = chain.candidates.iter().find(|c| c.selected);
         let kind = selected.map(|c| c.kind);
-        let mut managed = managed::enrich(name, &work.cwd, kind, &declarations, &roots);
+        let mut managed = managed::enrich(
+            name,
+            &work.cwd,
+            kind,
+            &declarations,
+            &roots,
+            work.project
+                .as_deref()
+                .and_then(Project::python_project_root),
+        );
         if let Some(candidate) = selected {
             managed::enrich_selected(
                 &mut managed,

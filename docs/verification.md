@@ -1,4 +1,6 @@
-# Verification
+# 0.1 baseline verification
+
+This is the historical 0.1 acceptance record. See [0.2 follow-up](verification-0.2.md) for the current status.
 
 ## Build and runtime evidence
 
