@@ -12,6 +12,7 @@ VERSION="${EXECSCOPE_VERSION:-}"
 PREFIX="${EXECSCOPE_PREFIX:-$HOME/.local/bin}"
 TARGET="${EXECSCOPE_TARGET:-}"
 DRY_RUN=0
+FORCE=0
 
 usage() {
   cat <<'EOF'
@@ -20,6 +21,7 @@ Install ExecScope from a GitHub release.
   --version <x.y.z>   release to install (default: the latest one)
   --prefix <dir>      where the binary goes (default: ~/.local/bin)
   --target <triple>   override the detected platform, e.g. x86_64-apple-darwin
+  --force             install even when that version is already there
   --dry-run           print what would be downloaded and installed
   -h, --help          this text
 
@@ -51,6 +53,10 @@ while [ $# -gt 0 ]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --force)
+      FORCE=1
       shift
       ;;
     -h|--help)
@@ -102,7 +108,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-if [ -x "$PREFIX/execscope" ]; then
+if [ "$FORCE" -eq 0 ] && [ -x "$PREFIX/execscope" ]; then
   installed="$("$PREFIX/execscope" --version 2>/dev/null || true)"
   if [ "$installed" = "execscope $VERSION" ]; then
     printf 'ExecScope %s is already installed at %s/execscope\n' "$VERSION" "$PREFIX"
