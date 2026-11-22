@@ -452,8 +452,18 @@ fn flow(text: &str) -> Option<Value> {
         depth: usize,
     }
     impl Parser<'_> {
+        /// Skips whitespace and `# comments`; a comment needs whitespace before it.
         fn skip_space(&mut self) {
-            while self.chars.next_if(|c| c.is_whitespace()).is_some() {}
+            let mut spaced = true;
+            loop {
+                if self.chars.next_if(|c| c.is_whitespace()).is_some() {
+                    spaced = true;
+                } else if spaced && self.chars.next_if_eq(&'#').is_some() {
+                    while self.chars.next_if(|c| *c != '\n').is_some() {}
+                } else {
+                    return;
+                }
+            }
         }
         fn value(&mut self) -> Option<Value> {
             self.skip_space();
@@ -487,7 +497,10 @@ fn flow(text: &str) -> Option<Value> {
         fn plain_text(&mut self, key: bool) -> String {
             let mut out = String::new();
             while let Some(&c) = self.chars.peek() {
-                if matches!(c, ',' | ']' | '}') || (key && c == ':') {
+                if matches!(c, ',' | ']' | '}')
+                    || (key && c == ':')
+                    || (c == '#' && out.ends_with(char::is_whitespace))
+                {
                     break;
                 }
                 out.push(c);
@@ -600,11 +613,12 @@ pub(crate) struct Names {
     /// Entries that exist but whose names are not safe to print.
     pub(crate) unnamed: usize,
     pub(crate) limited: bool,
+    /// Precedence of the layer that last set each name's state, parallel to `names`.
+    rank: Vec<u8>,
 }
 
 impl Names {
-    /// The first declaration of a name wins, so callers add sources in precedence
-    /// order: a project's `enabled: true` is not undone by a user-level `false`.
+    /// Within one layer the first declaration of a name wins.
     fn add(&mut self, name: &str, disabled: bool) {
         match safe::identifier(name, 64) {
             Some(name) if self.names.contains(&name) => {}
@@ -613,14 +627,34 @@ impl Names {
                     self.disabled.push(name.clone());
                 }
                 self.names.push(name);
+                self.rank.push(0);
             }
             None => self.unnamed += 1,
         }
     }
 
-    pub(crate) fn merge(&mut self, other: Names) {
+    /// Adds another layer's names. A layer of higher `rank` (project over user)
+    /// decides whether a name is disabled, whatever order the layers are read in.
+    pub(crate) fn merge(&mut self, other: Names, rank: u8) {
         for name in &other.names {
-            self.add(name, other.disabled.contains(name));
+            let disabled = other.disabled.contains(name);
+            match self.names.iter().position(|n| n == name) {
+                Some(i) if rank > self.rank[i] => {
+                    self.rank[i] = rank;
+                    self.disabled.retain(|d| d != name);
+                    if disabled {
+                        self.disabled.push(name.clone());
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    if disabled {
+                        self.disabled.push(name.clone());
+                    }
+                    self.names.push(name.clone());
+                    self.rank.push(rank);
+                }
+            }
         }
         self.unnamed += other.unnamed;
         self.limited |= other.limited;
@@ -859,6 +893,10 @@ mod tests {
         assert_eq!(v["model"], "m");
         let top = parse("# c\n{a: 1, b: [x, {c: on}]}\n", Format::Yaml).unwrap();
         assert_eq!(top, json!({"a": "1", "b": ["x", {"c": true}]}));
+        let commented = parse("{a: 1, # c\n b: [x, # d\n y]} # e\n", Format::Yaml).unwrap();
+        assert_eq!(commented, json!({"a": "1", "b": ["x", "y"]}));
+        let inline = parse("s: {u: 'a#b', v: c#d} # e\n", Format::Yaml).unwrap();
+        assert_eq!(inline["s"], json!({"u": "a#b", "v": "c#d"}));
         // Unbalanced flow syntax is not guessed.
         assert_eq!(
             parse("a: {b: [1}\n", Format::Yaml).unwrap()["a"],
@@ -884,15 +922,28 @@ mod tests {
     }
 
     #[test]
-    fn first_declaration_of_a_name_wins() {
-        let mut project = Names::default();
-        project.add("docs", false);
-        let mut user = Names::default();
-        user.add("docs", true);
-        user.add("web", true);
-        project.merge(user);
-        assert_eq!(project.names, ["docs", "web"]);
-        assert_eq!(project.disabled, ["web"]);
+    fn higher_layer_decides_disabled_state_in_any_order() {
+        let layer = |entries: &[(&str, bool)]| {
+            let mut n = Names::default();
+            entries.iter().for_each(|(name, off)| n.add(name, *off));
+            n
+        };
+        let user = || layer(&[("docs", true), ("web", true), ("fs", false)]);
+        let project = || layer(&[("docs", false), ("fs", true)]);
+        for user_first in [true, false] {
+            let mut all = Names::default();
+            if user_first {
+                all.merge(user(), 1);
+                all.merge(project(), 2);
+            } else {
+                all.merge(project(), 2);
+                all.merge(user(), 1);
+            }
+            let mut disabled = all.disabled.clone();
+            disabled.sort();
+            assert_eq!(disabled, ["fs", "web"], "user_first={user_first}");
+            assert_eq!(all.count(), 3);
+        }
     }
 
     #[test]

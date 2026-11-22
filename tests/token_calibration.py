@@ -55,6 +55,8 @@ CORPUS = [
     "kimi xiangqi zhongwen yunzhiwang 魑魅魍魉",
     "declared_skills=9 guanli-gongju,touzi-fenxi,caiwu-baobiao,huiyi-jilu,wenjian-zhengli,shuju-qingxi,kehu-genzong,xiangmu-guanli,renwu-paidui",
     "cyrszkkwltpszoccipwvcbxwjusvojwmvlaolftdpbgyjexhmmqowerplkjh",
+    "yexi xueshidahang shuyongkezongkai zdravstvuyte arigatogozaimasu",
+    "e8d2 4d7a6c92f01f v2 x86_64 aarch64 sha256",
 ]
 
 

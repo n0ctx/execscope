@@ -92,7 +92,9 @@ impl Capabilities {
             return;
         }
         let slot = self.slot(cap).get_or_insert_with(Inventory::default);
-        slot.all.merge(names);
+        // Project configuration overrides the user's for the same name.
+        slot.all
+            .merge(names, if source == "project_config" { 2 } else { 1 });
         if !slot.sources.contains(&source) {
             slot.sources.push(source);
         }
@@ -915,7 +917,10 @@ fn extract(sig: &Signature, c: &mut Candidate, project: &[PathBuf], env: &Env, r
         Trust::Check(check) => Some(check(&mut x)),
     };
     x.project_eligible = trust.is_none_or(|t| t == Some(true));
-    for source in sig.sources {
+    // Project layers override user layers; within a scope the table order holds.
+    let mut sources: Vec<&Source> = sig.sources.iter().collect();
+    sources.sort_by_key(|s| s.scope != Scope::Project);
+    for source in sources {
         let paths: Vec<PathBuf> = match source.scope {
             Scope::User => x
                 .root

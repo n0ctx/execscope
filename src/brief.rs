@@ -200,7 +200,7 @@ fn alphanumeric(run: &[u8]) -> usize {
     }
     if digits > 0 {
         // Mixed runs (hashes, ids, versions) split into short pieces.
-        return (len * 3).div_ceil(4);
+        return (len * 3).div_ceil(4) + 1;
     }
     let vowels = run.iter().filter(|b| b"aeiouyAEIOUY".contains(b)).count();
     let mut letters = [false; 128];
@@ -222,8 +222,9 @@ fn alphanumeric(run: &[u8]) -> usize {
         // split into short pieces.
         (len * 4).div_ceil(5).max(len.div_ceil(4) + 1)
     } else {
-        // Short words: one or two tokens, rarely more.
-        len.div_ceil(4) + 1
+        // Short words: English is often one token, but romanized names
+        // (pinyin, romaji) split near every syllable.
+        len.div_ceil(2)
     }
 }
 

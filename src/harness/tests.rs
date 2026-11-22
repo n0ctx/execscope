@@ -1440,3 +1440,23 @@ fn gemini_relative_trust_entries_grant_nothing() {
         );
     }
 }
+
+#[test]
+fn project_layer_decides_disabled_state_whatever_the_table_order() {
+    // Antigravity lists its user MCP file before the project one.
+    let mut f = Fixture::new();
+    f.ancestor("/Applications/Antigravity.app/Contents/MacOS/Electron", &[]);
+    f.file(".gemini/antigravity-cli/settings.json", "{}");
+    f.file(
+        ".gemini/config/mcp_config.json",
+        r#"{"mcpServers":{"docs":{"disabled":true},"web":{}}}"#,
+    );
+    f.project_file(
+        ".agents/mcp_config.json",
+        r#"{"mcpServers":{"docs":{"disabled":false},"web":{"disabled":true}}}"#,
+    );
+    let c = find(&f.run(false), "antigravity").clone();
+    let mcp = c.capabilities.mcp.unwrap();
+    assert_eq!(mcp.count, 2);
+    assert_eq!(mcp.disabled, ["web"]);
+}

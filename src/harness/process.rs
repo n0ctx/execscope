@@ -328,7 +328,7 @@ pub(crate) fn ancestry() -> Ancestry {
     // A parent that already exited (absent, or its id reused by a newer process) ends
     // the chain; one that exists but cannot be opened leaves it incomplete.
     while let Some(&parent) = parents.get(&child) {
-        if parent == 0 || parent == child {
+        if parent == 0 || parent == child || !parents.contains_key(&parent) {
             break;
         }
         if chain.len() == MAX_ANCESTORS {

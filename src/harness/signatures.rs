@@ -1246,7 +1246,7 @@ fn dsh_patch(x: &mut Extraction<'_>) {
             ),
             "@deepseek-ai/dsh-mcp-client" => {
                 if let Some(server) = cfg.and_then(|c| c.get("serverName")) {
-                    servers.merge(config::declared(&Value::Array(vec![server.clone()])));
+                    servers.merge(config::declared(&Value::Array(vec![server.clone()])), 0);
                 }
             }
             _ => {}
