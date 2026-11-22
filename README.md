@@ -6,7 +6,15 @@ The report describes the **local ExecScope process**, not the agent's live shell
 
 ## Install and run
 
-Unpack the archive for your OS and architecture, then put `execscope` (`execscope.exe` on Windows) in a directory on PATH. Verify the adjacent SHA-256 checksum before use. On macOS/Linux: `shasum -a 256 -c <archive>.sha256`; on PowerShell: `Get-FileHash -Algorithm SHA256 <archive>` and compare the hash. The binary does not require Rust, Python, Node.js, or an MCP package. Linux GNU builds require a compatible system glibc; the release workflow uses Ubuntu 22.04. Windows targets x64 on a release with `IsWow64Process2` (Windows 10 version 1709 or newer). macOS artifacts are not signed or notarized; follow your machine's policy for local unsigned software.
+On macOS and Linux, the installer downloads the archive for this machine, checks its SHA-256, and puts the binary in `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/n0ctx/execscope/main/scripts/install.sh | bash
+# a specific release or destination
+curl -fsSL https://raw.githubusercontent.com/n0ctx/execscope/main/scripts/install.sh | bash -s -- --version 0.2.0 --prefix /usr/local/bin
+```
+
+Or unpack the archive for your OS and architecture, then put `execscope` (`execscope.exe` on Windows) in a directory on PATH. Verify the adjacent SHA-256 checksum before use. On macOS/Linux: `shasum -a 256 -c <archive>.sha256`; on PowerShell: `Get-FileHash -Algorithm SHA256 <archive>` and compare the hash. The binary does not require Rust, Python, Node.js, or an MCP package. Linux GNU builds require a compatible system glibc; the release workflow uses Ubuntu 22.04. Windows targets x64 on a release with `IsWow64Process2` (Windows 10 version 1709 or newer). macOS artifacts are not signed or notarized; follow your machine's policy for local unsigned software.
 
 ```sh
 execscope
