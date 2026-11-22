@@ -384,6 +384,8 @@ fn strict_absolute(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These fixtures use POSIX absolute paths; Windows Path does not treat them as absolute.
+    #[cfg(unix)]
     #[test]
     fn resolves_v2_child_and_parent_limits_at_mount_root() {
         let mounts = "21 20 0:2 /tenant /sys/fs/cgroup rw - cgroup2 cgroup rw";
@@ -405,6 +407,7 @@ mod tests {
         assert_eq!(limits.memory_limit_bytes, Some(209715200));
         assert_eq!(limits.cpuset_cpus, Some(4));
     }
+    #[cfg(unix)]
     #[test]
     fn v1_split_mounts_and_unlimited_values() {
         let mounts = "10 1 0:10 / /c/cpu rw - cgroup cgroup rw,cpu,cpuacct\n11 1 0:11 / /c/mem rw - cgroup cgroup rw,memory\n12 1 0:12 / /c/set rw - cgroup cgroup rw,cpuset";

@@ -153,7 +153,11 @@ def smoke(binary):
                 assert full["schema_version"] == "1" and full["environment_source"] == "local_process", full
                 assert full["preflight"]["requested"] == params["requires"], full
                 assert full["cwd"]["source"] == "explicit" and "测试" in full["cwd"]["value"], full
-                direct = run(binary, "inspect", "--scope", "dev", "--detail", "full", "--cwd", str(cwd), "--requires", "node,pnpm,git")
+                # The first cold probe on a slow host can exhaust the tools budget; warm the
+                # same evidence the server already holds before comparing the two paths.
+                parity = ["inspect", "--scope", "dev", "--detail", "full", "--cwd", str(cwd), "--requires", "node,pnpm,git"]
+                run(binary, *parity, check=False)
+                direct = run(binary, *parity)
                 assert meaningful(json.loads(direct.stdout)) == meaningful(full), (direct.stdout, full)
                 for invalid in ({"extra": True}, {"scope": "bad"}, {"detail": None}, {"cwd": str(cwd / "missing")}, {"cwd": str(cwd / "package.json")}, {"requires": ["git", "git"]}, {"requires": ["NODE"]}):
                     c.call(invalid, error=True)
