@@ -42,7 +42,18 @@ pub(crate) fn token(input: &str, max: usize) -> Option<String> {
 }
 
 pub(crate) fn path(path: &Path) -> String {
-    let name = path.to_string_lossy();
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut name = path.to_string_lossy().into_owned();
+    // Windows canonical paths carry a verbatim prefix. Its `?` would trip the query-string
+    // guard below and hide every absolute path behind a redaction.
+    #[cfg(windows)]
+    {
+        if let Some(rest) = name.strip_prefix(r"\\?\UNC\") {
+            name = format!(r"\\{rest}");
+        } else if let Some(rest) = name.strip_prefix(r"\\?\") {
+            name = rest.to_owned();
+        }
+    }
     let lower = name.to_ascii_lowercase();
     if name.len() > 768
         || name.chars().any(|c| {
@@ -79,7 +90,7 @@ pub(crate) fn path(path: &Path) -> String {
         .as_deref()
         .map(Path::new)
         .filter(|p| p.is_absolute() && p.parent().is_some())
-        && let Ok(relative) = path.strip_prefix(home)
+        && let Ok(relative) = Path::new(name.as_str()).strip_prefix(home)
     {
         return if relative.as_os_str().is_empty() {
             "~".into()
@@ -87,7 +98,7 @@ pub(crate) fn path(path: &Path) -> String {
             format!("~/{}", relative.to_string_lossy())
         };
     }
-    name.into_owned()
+    name
 }
 
 pub(crate) fn serialize_path<S: Serializer>(
@@ -123,5 +134,16 @@ mod tests {
         assert_eq!(path(Path::new("/cache/token=dummy")), "<redacted_path>");
         assert_eq!(path(Path::new("/cache/\x1b[31m")), "<redacted_path>");
         assert_eq!(brief_path("/code/中文 space"), "\"/code/中文 space\"");
+    }
+
+    // Canonical Windows paths arrive with a verbatim prefix; it must not read as a query string.
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefix_is_not_a_redaction() {
+        assert_eq!(path(Path::new(r"\\?\C:\work\app")), r"C:\work\app");
+        assert_eq!(
+            path(Path::new(r"\\?\UNC\server\share\app")),
+            r"\\server\share\app"
+        );
     }
 }

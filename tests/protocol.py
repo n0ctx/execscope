@@ -152,7 +152,8 @@ def smoke(binary):
                 full = json.loads(c.call(params))
                 assert full["schema_version"] == "1" and full["environment_source"] == "local_process", full
                 assert full["preflight"]["requested"] == params["requires"], full
-                assert full["cwd"]["source"] == "explicit" and "测试" in full["cwd"]["value"], full
+                assert full["cwd"]["source"] == "explicit" and full["cwd"]["status"] == "available", full
+                assert "测试" in full["cwd"]["value"], full
                 # The first cold probe on a slow host can exhaust the tools budget; warm the
                 # same evidence the server already holds before comparing the two paths.
                 parity = ["inspect", "--scope", "dev", "--detail", "full", "--cwd", str(cwd), "--requires", "node,pnpm,git"]
