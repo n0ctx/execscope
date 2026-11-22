@@ -70,6 +70,52 @@ impl System {
                 "native" | "rosetta" | "wow64_or_emulated" | "linux_process" | "unknown"
             )
     }
+
+    /// Login-shell hint from `SHELL` or `COMSPEC`. Not the agent's interactive shell.
+    pub(crate) fn reported_shell(&self) -> &str {
+        self.login_shell_hint.as_deref().unwrap_or("unknown")
+    }
+}
+
+/// `COMSPEC` applies only when `SHELL` is unset or empty. A set but unknown
+/// `SHELL` stays unknown; it must not be replaced by a Windows shell hint.
+fn login_shell(
+    shell: Option<&std::ffi::OsStr>,
+    comspec: Option<&std::ffi::OsStr>,
+) -> Option<&'static str> {
+    if let Some(value) = shell.filter(|value| !value.is_empty()) {
+        return known_shell(value);
+    }
+    comspec
+        .filter(|value| !value.is_empty())
+        .and_then(known_shell)
+}
+
+fn known_shell(value: &std::ffi::OsStr) -> Option<&'static str> {
+    let text = value.to_str()?;
+    let name = text.rsplit(['/', '\\']).next().unwrap_or(text);
+    let base = name
+        .rsplit_once('.')
+        .filter(|(_, ext)| ext.eq_ignore_ascii_case("exe"))
+        .map(|(base, _)| base)
+        .unwrap_or(name);
+    [
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "sh",
+        "ksh",
+        "tcsh",
+        "csh",
+        "nu",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "xonsh",
+    ]
+    .into_iter()
+    .find(|shell| shell.eq_ignore_ascii_case(base))
 }
 
 fn present(key: &str) -> bool {
@@ -95,15 +141,11 @@ pub(crate) fn system(cwd: &Path) -> System {
     let (user_path_entries, machine_path_entries) = windows::secondary_path_counts();
     #[cfg(not(windows))]
     let (user_path_entries, machine_path_entries) = (None, None);
-    let shell = env::var_os("SHELL").and_then(|v| {
-        let value = Path::new(&v).file_name()?.to_str()?;
-        [
-            "bash", "zsh", "fish", "dash", "sh", "ksh", "tcsh", "csh", "nu", "pwsh", "xonsh",
-        ]
-        .into_iter()
-        .find(|s| *s == value)
-        .map(str::to_owned)
-    });
+    let shell = login_shell(
+        env::var_os("SHELL").as_deref(),
+        env::var_os("COMSPEC").as_deref(),
+    )
+    .map(str::to_owned);
     let developer = None;
     let virtualization_indicator = virtualization();
     System {
@@ -496,6 +538,34 @@ fn storage(cwd: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn login_shell_hint_keeps_only_allowlisted_basenames() {
+        use std::ffi::OsStr;
+        assert_eq!(known_shell(OsStr::new("/bin/zsh")), Some("zsh"));
+        assert_eq!(
+            known_shell(OsStr::new(r"C:\Windows\System32\cmd.EXE")),
+            Some("cmd")
+        );
+        assert_eq!(known_shell(OsStr::new("/bin/zsh -l")), None);
+        assert_eq!(known_shell(OsStr::new("/tmp/not-a-shell")), None);
+        assert_eq!(
+            login_shell(Some(OsStr::new("/bin/zsh")), Some(OsStr::new("cmd.exe"))),
+            Some("zsh")
+        );
+        assert_eq!(
+            login_shell(None, Some(OsStr::new(r"C:\Windows\System32\cmd.exe"))),
+            Some("cmd")
+        );
+        assert_eq!(
+            login_shell(Some(OsStr::new("")), Some(OsStr::new("cmd.exe"))),
+            Some("cmd")
+        );
+        assert_eq!(
+            login_shell(Some(OsStr::new("/bin/zsh -l")), Some(OsStr::new("cmd.exe"))),
+            None
+        );
+    }
+
     #[test]
     fn developer_directory_is_classified_by_usable_layout_not_name() {
         let temp = tempfile::tempdir().unwrap();

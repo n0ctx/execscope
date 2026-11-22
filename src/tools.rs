@@ -348,7 +348,9 @@ pub(crate) async fn collect(
             spawn(&mut tasks, name);
         }
     }
-    tasks.shutdown().await;
+    // Drop aborts in-flight tasks and returns. A stuck stat keeps its worker
+    // slot until it finishes; waiting here would hold the response past the budget.
+    drop(tasks);
     for name in names {
         result.entry(name).or_insert_with(timeout_fact);
     }
@@ -594,6 +596,9 @@ fn choose<'a>(selected: Option<&'a Candidate>, managed: &'a Managed) -> Selectio
         Kind::Foreign => (None, "foreign_binary", Some("runtime_not_selected")),
         Kind::Direct => (found.target.as_deref(), "process_path", None),
         Kind::Wrapper => (None, "process_path_wrapper", None),
+        // The toolchain binary lives outside trusted install roots. Static
+        // selection is the evidence; launching it would not make it verified.
+        Kind::Rustup => (None, managed.source, managed.blocker),
         _ => (managed.selected.as_deref(), managed.source, managed.blocker),
     };
     Selection {
@@ -629,6 +634,32 @@ fn timeout_fact() -> Fact {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rustup_selection_is_not_a_probe_target() {
+        use crate::lookup::Candidate;
+        let candidate = Candidate {
+            path: PathBuf::from("/opt/homebrew/opt/rustup/bin/rustc"),
+            target: Some(PathBuf::from(
+                "/opt/homebrew/Cellar/rustup/1.29.3/bin/rustc",
+            )),
+            invocation: "rustc".into(),
+            kind: Kind::Rustup,
+            executable: true,
+            source: "process_path",
+            selected: true,
+        };
+        let managed = Managed::bare(
+            "rustup_selected_toolchain",
+            Some(PathBuf::from(
+                "/home/u/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc",
+            )),
+        );
+        let selection = choose(Some(&candidate), &managed);
+        assert!(selection.target.is_none());
+        assert_eq!(selection.source, "rustup_selected_toolchain");
+        assert!(selection.blocker.is_none());
+    }
 
     #[test]
     fn baseline_tools_are_added_once_and_only_when_asked() {

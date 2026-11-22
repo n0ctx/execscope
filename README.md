@@ -2,7 +2,7 @@
 
 ExecScope reports facts about the process that will inspect an environment. Use it before choosing a build command, package manager, or runtime. Its optional **Execution Preflight** checks named tools without attempting a build or installation. **Harness awareness** names the agent harness (Claude Code, Codex, Pi and others) that launched the process, the model it is configured to use, the MCP servers, Skills, subagents and extensions it declares, and restrictions that may block the agent.
 
-The report describes the **local ExecScope process**, not the agent's live shell. Shell aliases, functions, and unexported version-manager state are not visible. Passing `cwd` changes project lookup and the directory of eligible probes; it does not change the process PATH or enter another OS. If you will run commands in WSL, a container, or an SSH session, run ExecScope inside that environment.
+The report describes the **local ExecScope process**, not the agent's live shell. The brief `shell` value is the process `SHELL`, or `COMSPEC` when `SHELL` is unset, if that name is a known shell; otherwise it is `unknown`. Shell aliases, functions, and unexported version-manager state are not visible. Passing `cwd` changes project lookup and the directory of eligible probes; it does not change the process PATH or enter another OS. If you will run commands in WSL, a container, or an SSH session, run ExecScope inside that environment.
 
 ## Install and run
 

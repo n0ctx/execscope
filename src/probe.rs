@@ -443,6 +443,7 @@ fn version_from(name: &str, bytes: &[u8]) -> Option<String> {
         "clang" => line
             .strip_prefix("Apple clang version ")
             .or_else(|| line.strip_prefix("clang version ")),
+        "gcc" if let Some(version) = line.strip_prefix("Apple clang version ") => Some(version),
         "gcc"
             if line.starts_with("gcc ")
                 || line.starts_with("gcc-")
@@ -490,6 +491,13 @@ mod tests {
             Some("2.42.3".into())
         );
         assert_eq!(version_from("node", b"v24.1.0\n"), Some("24.1.0".into()));
+        assert_eq!(
+            version_from(
+                "gcc",
+                b"Apple clang version 21.0.0 (clang-2100.4.1.1)\nTarget: arm64\n"
+            ),
+            Some("21.0.0".into())
+        );
         assert_eq!(version_from("git", b"ignore this 2.42.3"), None);
         assert_eq!(version_from("git", b"git version \x1b[31m2.42.3"), None);
         assert_eq!(version_from("git", &[b'a'; 4097]), None);

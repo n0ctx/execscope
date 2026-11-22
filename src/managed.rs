@@ -78,7 +78,10 @@ pub(crate) fn classify(name: &str, path: &Path, target: Option<&Path>) -> Kind {
         && (has("/.cargo/bin/")
             || target
                 .and_then(Path::file_stem)
-                .is_some_and(|s| s == "rustup"))
+                .is_some_and(|s| s == "rustup")
+            || rustup_formula_proxy(path)
+            || target.is_some_and(rustup_formula_proxy)
+            || env_dir("CARGO_HOME").is_some_and(|home| cargo_home_bin(path, target, &home)))
     {
         return Kind::Rustup;
     }
@@ -451,6 +454,21 @@ pub(crate) fn enrich(
 }
 
 impl Managed {
+    #[cfg(test)]
+    pub(crate) fn bare(source: &'static str, selected: Option<PathBuf>) -> Self {
+        Self {
+            selected,
+            alternatives: vec![],
+            blocker: None,
+            source,
+            evidence: vec![],
+            requested: None,
+            discovered_version: None,
+            version_source: None,
+            uv_project: None,
+        }
+    }
+
     fn note(&mut self, evidence: &'static str) {
         if !self.evidence.contains(&evidence) {
             self.evidence.push(evidence);
@@ -736,9 +754,40 @@ fn rustup(
         });
         r.note("rustup_selected_target_missing");
     } else {
+        if governing && let Some(version) = toolchain_semver(toolchain.file_name()) {
+            r.record_version(&version, "rustup_toolchain_directory");
+        }
         r.observe(tool, governing, "rustup_selected_toolchain", pin);
     }
     governing
+}
+
+/// Homebrew's rustup formula proxies live under `opt/rustup/bin` or `Cellar/rustup`,
+/// not `~/.cargo/bin`. The canonical target is a shell script, not the `rustup` binary.
+fn rustup_formula_proxy(path: &Path) -> bool {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(|part| part.to_ascii_lowercase())
+        .collect();
+    parts
+        .windows(3)
+        .any(|window| window[0] == "opt" && window[1] == "rustup" && window[2] == "bin")
+        || parts
+            .windows(2)
+            .any(|window| window[0] == "cellar" && window[1] == "rustup")
+}
+
+fn cargo_home_bin(path: &Path, target: Option<&Path>, home: &Path) -> bool {
+    let bin = home.join("bin");
+    path.starts_with(&bin) || target.is_some_and(|candidate| candidate.starts_with(&bin))
+}
+
+fn toolchain_semver(name: Option<&std::ffi::OsStr>) -> Option<String> {
+    let head = name?.to_str()?.split('-').next()?;
+    (head.len() <= 32
+        && semver::Version::parse(head).is_ok_and(|v| v.pre.is_empty() && v.build.is_empty()))
+    .then(|| head.to_owned())
 }
 
 fn corepack(r: &mut Managed, root: &Path, name: &str, pin: &str) {
@@ -861,6 +910,63 @@ mod tests {
             classify("node", Path::new("/opt/asdf/shims/node"), None),
             Kind::Asdf
         );
+        assert_eq!(
+            classify(
+                "cargo",
+                Path::new("/opt/homebrew/opt/rustup/bin/cargo"),
+                Some(Path::new("/opt/homebrew/Cellar/rustup/1.29.3/bin/cargo"))
+            ),
+            Kind::Rustup
+        );
+        assert_eq!(
+            classify("rustc", Path::new("/usr/local/opt/rustup/bin/rustc"), None),
+            Kind::Rustup
+        );
+        assert_eq!(
+            classify("cargo", Path::new("/tmp/not-rustup/bin/cargo"), None),
+            Kind::Direct
+        );
+        assert_eq!(
+            classify("node", Path::new("/opt/homebrew/opt/rustup/bin/node"), None),
+            Kind::Direct
+        );
+        let home = Path::new("/tmp/cargo-home-fixture");
+        let proxy = home.join("bin/cargo");
+        assert!(cargo_home_bin(&proxy, None, home));
+        assert!(cargo_home_bin(
+            Path::new("/tmp/other/bin/cargo"),
+            Some(proxy.as_path()),
+            home
+        ));
+        assert!(!cargo_home_bin(
+            Path::new("/tmp/other/bin/cargo"),
+            None,
+            home
+        ));
+    }
+    #[test]
+    fn cargo_home_bin_on_path_is_rustup() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let previous = std::env::var_os("CARGO_HOME");
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(value) => std::env::set_var("CARGO_HOME", value),
+                        None => std::env::remove_var("CARGO_HOME"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        unsafe { std::env::set_var("CARGO_HOME", &home) };
+        assert_eq!(
+            classify("cargo", &home.join("bin/cargo"), None),
+            Kind::Rustup
+        );
+        assert_eq!(classify("node", &home.join("bin/node"), None), Kind::Direct);
     }
     #[test]
     fn rustup_missing_component_nearest_override_and_env_precedence() {
@@ -890,6 +996,45 @@ mod tests {
         assert!(rustup(&mut r, &home, &child, Some("1.92"), "cargo", true));
         assert_eq!(r.requested.as_deref(), Some("1.92"));
         assert_eq!(r.blocker, Some("required_toolchain_component_unavailable"));
+    }
+    #[test]
+    fn rustup_versioned_toolchain_directory_is_discovered_without_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("ru");
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let tool = home
+            .join("toolchains/1.100.0-test-host/bin")
+            .join(file("cargo"));
+        fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        fs::write(&tool, "fixture; must not launch").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(
+            home.join("settings.toml"),
+            "default_toolchain='1.100.0-test-host'\n",
+        )
+        .unwrap();
+        let mut r = new();
+        assert!(rustup(&mut r, &home, &work, None, "cargo", true));
+        assert_eq!(r.discovered_version.as_deref(), Some("1.100.0"));
+        assert_eq!(r.version_source, Some("rustup_toolchain_directory"));
+        assert!(r.selected.is_some());
+        assert!(r.blocker.is_none());
+        assert_eq!(
+            toolchain_semver(Some(std::ffi::OsStr::new("stable-aarch64-apple-darwin"))),
+            None
+        );
+        assert_eq!(
+            toolchain_semver(Some(std::ffi::OsStr::new(
+                "nightly-2026-10-01-x86_64-unknown-linux-gnu"
+            ))),
+            None
+        );
     }
     #[test]
     fn rustup_absolute_path_override_is_not_a_default_channel() {

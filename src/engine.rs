@@ -548,8 +548,12 @@ mod platform_brief {
         let mut line = Line::new(
             1,
             format!(
-                "os={}/{} exec={} shell=unknown access={}",
-                data.os, data.process_arch, data.execution, data.privilege
+                "os={}/{} exec={} shell={} access={}",
+                data.os,
+                data.process_arch,
+                data.execution,
+                data.reported_shell(),
+                data.privilege
             ),
         );
         if data.cwd_access == "not_writable_estimate" {
