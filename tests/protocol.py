@@ -145,7 +145,12 @@ def smoke(binary):
             with session(binary, version) as c:
                 tools = c.request("tools/list")["result"]["tools"]
                 assert [t["name"] for t in tools] == ["inspect_environment"], tools
-                assert tools[0]["inputSchema"]["additionalProperties"] is False
+                schema = tools[0]["inputSchema"]
+                assert schema["additionalProperties"] is False
+                assert set(schema["properties"]) == {"scope", "detail", "cwd", "refresh", "requires", "brief_tokens"}, schema
+                assert "harness" in schema["properties"]["scope"]["enum"], schema
+                assert (schema["properties"]["brief_tokens"]["minimum"], schema["properties"]["brief_tokens"]["maximum"]) == (100, 3000)
+                assert len(json.dumps(tools[0])) < 2600, len(json.dumps(tools[0]))
                 assert "cwd=" in c.call()
                 assert "preflight=" not in c.call({})
                 params = {"scope": "dev", "detail": "full", "cwd": str(cwd), "requires": ["node", "pnpm", "git"]}
@@ -160,8 +165,12 @@ def smoke(binary):
                 run(binary, *parity, check=False)
                 direct = run(binary, *parity)
                 assert meaningful(json.loads(direct.stdout)) == meaningful(full), (direct.stdout, full)
-                for invalid in ({"extra": True}, {"scope": "bad"}, {"detail": None}, {"cwd": str(cwd / "missing")}, {"cwd": str(cwd / "package.json")}, {"requires": ["git", "git"]}, {"requires": ["NODE"]}):
+                for invalid in ({"extra": True}, {"scope": "bad"}, {"detail": None}, {"cwd": str(cwd / "missing")}, {"cwd": str(cwd / "package.json")}, {"requires": ["git", "git"]}, {"requires": ["NODE"]},
+                                {"brief_tokens": 99}, {"brief_tokens": 3001}, {"brief_tokens": "600"}, {"brief_tokens": 600.5}, {"brief_tokens": -1}, {"brief_tokens": 600, "detail": "full"}, {"harness": "pi"}):
                     c.call(invalid, error=True)
+                for budget in (100, 101, 600, 2999, 3000):
+                    assert "cwd=" in c.call({"brief_tokens": budget, "cwd": str(cwd)})
+                assert len(c.call({"brief_tokens": 100, "scope": "all", "cwd": str(cwd)})) < len(c.call({"brief_tokens": 3000, "scope": "all", "cwd": str(cwd)}))
                 assert "error" in c.request("tools/call", {"name": "not_a_tool"})
                 if version == "2025-11-25":
                     ident = c.submit("tools/call", {"name": "inspect_environment", "arguments": {"scope": "all", "cwd": str(cwd), "refresh": True}})
@@ -170,13 +179,17 @@ def smoke(binary):
                     # Completion may win the race; a cancelled request need not reply.
                     after = c.request("tools/list")
                     assert len(after["result"]["tools"]) == 1, after
-                for scope in ("auto", "dev", "system", "hardware", "all"):
+                for scope in ("auto", "dev", "system", "hardware", "harness", "all"):
                     report = json.loads(c.call({"scope": scope, "detail": "full", "cwd": str(cwd), "refresh": True}))
                     assert "active_network" not in report and "preflight" not in report, report
                     assert ("system" in report) == (scope != "hardware"), report
                     assert ("project" in report) == (scope in ("auto", "dev", "all")), report
                     assert ("network" in report) == (scope in ("auto", "all")), report
                     assert ("hardware" in report) == (scope in ("auto", "hardware", "all")), report
+                    assert ("harness" in report) == (scope in ("auto", "harness", "all")), report
+                    if "harness" in report:
+                        assert report["harness"]["inspection_boundary"] == "local_process", report
+                        assert "mcp_server_context_not_caller_session" in report["harness"]["notes"], report
                 assert json.loads(c.call({"requires": [], "detail": "full"}))["preflight"]["status"] == "ready"
                 (cwd / "package.json").write_text('{"engines":{"node":"22"}}', encoding="utf-8")
                 changed = json.loads(c.call(params))
@@ -193,8 +206,63 @@ def smoke(binary):
         for detail in ("brief", "full"):
             report = run(binary, "inspect", "--cwd", str(cwd), "--detail", detail, env=private)
             assert "never-output" not in report.stdout and "secret-test-pass" not in report.stdout, report
-    print("Passed independent stdio discovery, default and explicit calls, schema/error, scope, cache change, CLI parity, privacy and clean EOF checks (2025-11-25 and 2026-07-28).")
+        for args in (["--brief-tokens", "99"], ["--brief-tokens", "3001"], ["--brief-tokens", "x"], ["--detail", "full", "--brief-tokens", "600"], ["--harness", "pi"]):
+            bad = run(binary, "inspect", *args, check=False)
+            assert bad.returncode == 2 and not bad.stdout, (args, bad)
+    print("Passed independent stdio discovery, default and explicit calls, schema/error, scope, brief budget, cache change, CLI parity, privacy and clean EOF checks (2025-11-25 and 2026-07-28).")
+    harness_cases(binary)
     evidence_cases(binary)
+
+
+HINTS = ("CLAUDECODE", "CODEX_THREAD_ID", "CODEX_SANDBOX", "GEMINI_CLI", "KIMI_CODE_SESSION_ID", "DSH_SESSION_ID", "CURSOR_AGENT",
+         "ZCODE_SESSION_ID", "PI_CODING_AGENT", "AI_AGENT", "HERMES_SESSION_ID", "HERMES_AGENT", "OPENCODE", "OPENCODE_PID",
+         "OPENCLAW_SHELL", "OPENCLAW_CLI")
+
+
+def harness_cases(binary):
+    """Fixture home with an environment hint: identity, configured model, inventory refresh, privacy."""
+    with tempfile.TemporaryDirectory(prefix="execscope harness ") as tmp:
+        home = Path(tmp).resolve() / "home"
+        agent = home / ".pi" / "agent"
+        (agent / "skills" / "first").mkdir(parents=True)
+        (agent / "skills" / "first" / "SKILL.md").write_text("---\nname: first\n---\n", encoding="utf-8")
+        (agent / "settings.json").write_text(json.dumps({"defaultProvider": "fixture-provider", "defaultModel": "fixture-model-2031",
+                                                          "defaultThinkingLevel": "high", "unknownFutureKey": {"x": 1}}), encoding="utf-8")
+        (agent / "mcp.json").write_text(json.dumps({"mcpServers": {"docs": {"command": "x", "env": {"TOKEN": "never-output-harness"}}}}), encoding="utf-8")
+        project = home / "work"
+        project.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in HINTS}
+        env.update({"HOME": str(home), "USERPROFILE": str(home), "PI_CODING_AGENT": "true"})
+        # The runner may itself run under a harness (process ancestry); Pi is then a
+        # secondary, environment-linked candidate rather than the primary.
+        def pi_of(report):
+            return next(c for c in report["harness"]["candidates"] if c["id"] == "pi")
+
+        with session(binary, env=env) as c:
+            full = json.loads(c.call({"scope": "harness", "detail": "full", "cwd": str(project)}))
+            pi = pi_of(full)
+            assert pi["presence"] == "process_linked" and "environment_hint" in pi["evidence"], pi
+            assert pi["configured_model"] == {"provider": "fixture-provider", "model": "fixture-model-2031",
+                                              "thinking": "high", "source": "user_config"}, pi
+            assert pi["capabilities"]["skills"]["names"] == ["first"], pi
+            assert pi["capabilities"]["mcp"]["names"] == ["docs"], pi
+            brief = c.call({"scope": "harness", "cwd": str(project)})
+            if full["harness"]["primary"] == "pi":
+                assert "harness=pi process_linked(environment_hint)" in brief, brief
+                assert "model_config=fixture-provider/fixture-model-2031 thinking=high" in brief, brief
+            else:
+                assert "also_linked=" in brief and "pi" in brief, brief
+            (agent / "skills" / "second").mkdir()
+            (agent / "skills" / "second" / "SKILL.md").write_text("x", encoding="utf-8")
+            again = json.loads(c.call({"scope": "harness", "detail": "full", "cwd": str(project), "refresh": True}))
+            assert pi_of(again)["capabilities"]["skills"]["names"] == ["first", "second"], again
+            assert "never-output-harness" not in json.dumps(again)
+        cli = json.loads(run(binary, "inspect", "--scope", "harness", "--detail", "full", "--cwd", str(project), env=env).stdout)
+        assert pi_of(cli)["configured_model"] == pi_of(again)["configured_model"], cli
+        unlinked = json.loads(run(binary, "inspect", "--scope", "harness", "--detail", "full", "--cwd", str(project),
+                                  env={**env, "PI_CODING_AGENT": ""}).stdout)
+        assert pi_of(unlinked)["presence"] == "configured", unlinked
+    print("Passed harness identity, configured model, inventory refresh and secret-filtering checks against a fixture home.")
 
 
 def evidence_cases(binary):
@@ -283,7 +351,7 @@ def evidence_cases(binary):
           "Corepack and rustup cache/selection changes surfaced in the same MCP session.")
 
 
-def benchmark(binary, n, cwd, tokenizer, fastfetch):
+def benchmark(binary, n, cwd, tokenizer, fastfetch, harness):
     rows = {}
 
     def measure(name, call):
@@ -328,6 +396,8 @@ def benchmark(binary, n, cwd, tokenizer, fastfetch):
         c.call(base)
         measure("mcp_warm_auto_brief", lambda: c.call(base))
         measure("mcp_refresh_all_full", lambda: c.call({**base, "scope": "all", "detail": "full", "refresh": True}))
+        if harness:
+            measure("mcp_harness_brief", lambda: c.call({**base, "scope": "harness"}))
         c.call({**base, "requires": ["node", "git"]})
         measure("mcp_warm_preflight", lambda: c.call({**base, "requires": ["node", "git"]}))
     if fastfetch:
@@ -342,9 +412,10 @@ def main():
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--tokenizer", action="store_true", help="measure with developer dependency tiktoken")
     parser.add_argument("--fastfetch", action="store_true", help="measure the installed Fastfetch host-only baseline")
+    parser.add_argument("--no-harness", action="store_true", help="skip scope=harness timing (for binaries older than 0.3)")
     args = parser.parse_args()
     if args.repeat > 0:
-        benchmark(args.binary.resolve(), args.repeat, args.cwd.resolve(), args.tokenizer, args.fastfetch)
+        benchmark(args.binary.resolve(), args.repeat, args.cwd.resolve(), args.tokenizer, args.fastfetch, not args.no_harness)
     else:
         smoke(args.binary.resolve())
 

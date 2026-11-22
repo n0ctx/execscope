@@ -41,6 +41,43 @@ pub(crate) fn token(input: &str, max: usize) -> Option<String> {
     .then(|| value.to_owned())
 }
 
+const SECRET_MARKERS: &[&str] = &[
+    "password=",
+    "passwd=",
+    "token=",
+    "api_key=",
+    "secret=",
+    "authorization=",
+    "bearer ",
+    "cookie=",
+    "xoxb-",
+    "ghp_",
+    "github_pat_",
+    "sk-live-",
+    "sk-proj-",
+    "sk-ant-",
+];
+
+fn secret_like(lower: &str) -> bool {
+    SECRET_MARKERS.iter().any(|p| lower.contains(p))
+}
+
+/// A configuration-declared name or identifier (model, provider, MCP server, Skill)
+/// that is safe to print: letters/digits in any script plus `._-:@/+`, bounded length,
+/// no URL or credential-looking content.
+pub(crate) fn identifier(input: &str, max_chars: usize) -> Option<String> {
+    let value = input.trim();
+    let lower = value.to_ascii_lowercase();
+    (!value.is_empty()
+        && value.chars().count() <= max_chars
+        && value
+            .chars()
+            .all(|c| c.is_alphanumeric() || "._-:@/+".contains(c))
+        && !value.contains("://")
+        && !secret_like(&lower))
+    .then(|| value.to_owned())
+}
+
 pub(crate) fn path(path: &Path) -> String {
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut name = path.to_string_lossy().into_owned();
@@ -62,23 +99,7 @@ pub(crate) fn path(path: &Path) -> String {
         || name.contains("://")
         || lower.contains("%3a%2f%2f")
         || name.contains('?')
-        || [
-            "password=",
-            "passwd=",
-            "token=",
-            "api_key=",
-            "secret=",
-            "authorization=",
-            "bearer ",
-            "cookie=",
-            "xoxb-",
-            "ghp_",
-            "github_pat_",
-            "sk-live-",
-            "sk-proj-",
-        ]
-        .iter()
-        .any(|p| lower.contains(p))
+        || secret_like(&lower)
     {
         return "<redacted_path>".to_owned();
     }
@@ -134,6 +155,15 @@ mod tests {
         assert_eq!(path(Path::new("/cache/token=dummy")), "<redacted_path>");
         assert_eq!(path(Path::new("/cache/\x1b[31m")), "<redacted_path>");
         assert_eq!(brief_path("/code/中文 space"), "\"/code/中文 space\"");
+        assert_eq!(
+            identifier(" qwen3.8-27b ", 96).as_deref(),
+            Some("qwen3.8-27b")
+        );
+        assert_eq!(identifier("代码审查", 96).as_deref(), Some("代码审查"));
+        for bad in ["a b", "x;rm", "https://h", "sk-ant-abc", "", "\u{202e}x"] {
+            assert_eq!(identifier(bad, 96), None, "{bad}");
+        }
+        assert_eq!(identifier(&"a".repeat(65), 64), None);
     }
 
     // Canonical Windows paths arrive with a verbatim prefix; it must not read as a query string.

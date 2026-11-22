@@ -33,11 +33,14 @@ choices!(
     Dev = "dev",
     Hardware = "hardware",
     Network = "network",
+    Harness = "harness",
     All = "all"
 );
 choices!(Detail, Brief = "brief", Full = "full");
 
 pub(crate) const MAX_REQUIRED: usize = 16;
+pub(crate) const BRIEF_TOKENS: std::ops::RangeInclusive<u16> = 100..=3000;
+pub(crate) const DEFAULT_BRIEF_TOKENS: u16 = 600;
 pub(crate) const TOOLS: &[&str] = &[
     "git", "python", "pip", "uv", "node", "npm", "pnpm", "yarn", "bun", "rustc", "cargo", "go",
     "swift", "java", "javac", "dotnet", "gcc", "clang", "cmake", "docker",
@@ -79,10 +82,19 @@ pub(crate) struct Request {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) refresh: bool,
     pub(crate) requires: Option<Vec<Tool>>,
+    pub(crate) brief_tokens: Option<u16>,
 }
 
 impl Request {
     pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if let Some(budget) = self.brief_tokens {
+            if self.detail == Detail::Full {
+                return Err("brief_tokens applies only to detail=brief");
+            }
+            if !BRIEF_TOKENS.contains(&budget) {
+                return Err("brief_tokens must be an integer from 100 to 3000");
+            }
+        }
         if let Some(requires) = &self.requires {
             if requires.len() > MAX_REQUIRED {
                 return Err("at most 16 prerequisites are allowed");
@@ -151,5 +163,35 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn brief_budget_bounds_and_detail() {
+        let parse = |s: &str| serde_json::from_str::<Request>(s).map(|r| r.validate());
+        for ok in ["100", "600", "3000", "1234"] {
+            assert_eq!(
+                parse(&format!(r#"{{"brief_tokens":{ok}}}"#)).unwrap(),
+                Ok(())
+            );
+        }
+        for out in ["99", "3001", "0"] {
+            assert!(
+                parse(&format!(r#"{{"brief_tokens":{out}}}"#))
+                    .unwrap()
+                    .is_err()
+            );
+        }
+        for bad in [r#""600""#, "600.5", "-1", "70000", "true"] {
+            assert!(
+                parse(&format!(r#"{{"brief_tokens":{bad}}}"#)).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            parse(r#"{"brief_tokens":600,"detail":"full"}"#)
+                .unwrap()
+                .is_err()
+        );
+        assert!(parse(r#"{"scope":"harness"}"#).unwrap().is_ok());
     }
 }

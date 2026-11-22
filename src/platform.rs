@@ -60,6 +60,18 @@ pub(crate) struct Developer {
     swift_binary_observed: bool,
 }
 
+impl System {
+    /// The process runs over SSH or inside a container/WSL boundary, so facts about
+    /// local harness configuration describe this host, not the user's desktop.
+    pub(crate) fn remote_or_isolated(&self) -> bool {
+        self.ssh_indicator
+            || !matches!(
+                self.execution,
+                "native" | "rosetta" | "wow64_or_emulated" | "linux_process" | "unknown"
+            )
+    }
+}
+
 fn present(key: &str) -> bool {
     env::var_os(key).is_some_and(|s| !s.is_empty())
 }

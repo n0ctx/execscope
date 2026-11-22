@@ -1,6 +1,6 @@
 use crate::{
     engine::Engine,
-    model::{Detail, MAX_REQUIRED, Request, Scope, TOOLS},
+    model::{BRIEF_TOKENS, DEFAULT_BRIEF_TOKENS, Detail, MAX_REQUIRED, Request, Scope, TOOLS},
 };
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt, model::*, service::RequestContext,
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 
 const NAME: &str = "inspect_environment";
-const DESCRIPTION: &str = "Inspect the local server process environment before commands, builds, installs, or debugging. Call with no arguments for a short snapshot, or specify cwd and requires to check named prerequisites. Only scope=network makes outbound diagnostics.";
+const DESCRIPTION: &str = "Inspect the ExecScope server process environment before commands, builds, installs, or debugging: OS, project, tools, and the agent harness linked to this process with its configured model and declared MCP/skills/agents. Describes this server process, not necessarily the caller's terminal, live model, or session. Call with no arguments for a short snapshot; scope=harness focuses on harnesses; requires checks named prerequisites. Only scope=network makes outbound diagnostics.";
 static TOOL: LazyLock<Tool> = LazyLock::new(|| {
     let schema: JsonObject = serde_json::from_value(json!({
         "type": "object", "additionalProperties": false,
@@ -20,7 +20,9 @@ static TOOL: LazyLock<Tool> = LazyLock::new(|| {
             "cwd": {"type":"string", "description":"Local project directory; does not select another machine or shell."},
             "refresh": {"type":"boolean", "default":false},
             "requires": {"type":"array", "description":"Check named local prerequisites; does not run user commands or permit network access.",
-                "items":{"type":"string", "enum":TOOLS}, "maxItems":MAX_REQUIRED, "uniqueItems":true}
+                "items":{"type":"string", "enum":TOOLS}, "maxItems":MAX_REQUIRED, "uniqueItems":true},
+            "brief_tokens": {"type":"integer", "minimum":BRIEF_TOKENS.start(), "maximum":BRIEF_TOKENS.end(), "default":DEFAULT_BRIEF_TOKENS,
+                "description":"Approximate brief size limit; brief only."}
         }
     })).expect("static tool schema is an object");
     Tool::new(NAME, DESCRIPTION, schema)

@@ -1,4 +1,6 @@
+mod brief;
 mod engine;
+mod harness;
 mod lookup;
 mod managed;
 mod mcp;
@@ -32,7 +34,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Report local facts. Only --scope network performs outbound diagnostics.
+    /// Report local facts. Only --scope network performs outbound diagnostics; --scope harness focuses on agent harnesses.
     Inspect {
         #[arg(long, value_enum, default_value_t)]
         scope: Scope,
@@ -47,6 +49,9 @@ enum Command {
         /// Check comma-separated lowercase prerequisites (for example: node,pnpm,git).
         #[arg(long, value_name = "TOOL[,TOOL...]")]
         requires: Option<String>,
+        /// Approximate token budget for the brief report, 100 to 3000 (default 600).
+        #[arg(long, value_name = "N")]
+        brief_tokens: Option<u16>,
     },
     /// Serve the inspect_environment tool over MCP stdio.
     Mcp,
@@ -106,12 +111,14 @@ fn main() -> ExitCode {
                         cwd,
                         refresh,
                         requires,
+                        brief_tokens,
                     }) => Request {
                         scope,
                         detail,
                         cwd,
                         refresh,
                         requires: requires.as_deref().map(parse_requirements).transpose()?,
+                        brief_tokens,
                     },
                     Some(Command::Mcp) => unreachable!(),
                 };

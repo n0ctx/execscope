@@ -1,4 +1,6 @@
 use crate::{
+    brief::{self, Line},
+    harness,
     model::{self, Detail, Request, Sample, Scope, Status},
     network, platform, project, safe, tools,
 };
@@ -40,6 +42,8 @@ struct Snapshot<'a> {
     network: Option<Sample<network::Passive>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_network: Option<Sample<network::Active>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<Sample<harness::Harness>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     tools: BTreeMap<&'static str, tools::Fact>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -136,11 +140,19 @@ impl Engine {
         let requested = request.requires.as_deref();
         let needs_project = matches!(scope, Scope::Auto | Scope::Dev | Scope::All)
             || requested.is_some_and(|r| !r.is_empty());
-        let needs_system = matches!(scope, Scope::Auto | Scope::System | Scope::Dev | Scope::All);
+        let needs_system = matches!(
+            scope,
+            Scope::Auto | Scope::System | Scope::Dev | Scope::Harness | Scope::All
+        );
+        let needs_harness = matches!(scope, Scope::Auto | Scope::Harness | Scope::All);
+        let harness_context = harness::Context {
+            mcp_server: self.caches.is_some(),
+            focused: matches!(scope, Scope::Harness | Scope::All),
+        };
         let needs_hardware = matches!(scope, Scope::Auto | Scope::Hardware | Scope::All);
         let needs_network = matches!(scope, Scope::Auto | Scope::Network | Scope::All);
         let deep_hardware = matches!(scope, Scope::Hardware | Scope::All);
-        let (mut system, project, hardware, network, developer) = tokio::join!(
+        let (mut system, project, hardware, network, mut harness, developer) = tokio::join!(
             maybe_blocking(needs_system, &self.slots, {
                 let cwd = cwd.clone();
                 move || Sample::new(platform::system(&cwd))
@@ -185,6 +197,10 @@ impl Engine {
                     }
                 }
             }),
+            maybe_blocking(needs_harness, &self.slots, {
+                let cwd = cwd.clone();
+                move || Sample::new(harness::inspect(&cwd, harness_context))
+            }),
             async {
                 #[cfg(target_os = "macos")]
                 if needs_system
@@ -198,6 +214,11 @@ impl Engine {
                 None::<(platform::Developer, Option<PathBuf>)>
             },
         );
+        if let (Some(harness), Some(system)) = (&mut harness, &system)
+            && system.data.remote_or_isolated()
+        {
+            harness.data.note("harness_facts_describe_this_host_only");
+        }
         let _developer_dir = developer.and_then(|(facts, path)| {
             if let Some(system) = &mut system {
                 system.data.developer = Some(facts);
@@ -278,6 +299,11 @@ impl Engine {
                 active.as_ref().map(|m| m.data.status),
                 "network_target_check_incomplete",
             ),
+            (
+                needs_harness,
+                harness.as_ref().map(|_| Status::Available),
+                "harness_incomplete",
+            ),
         ] {
             if attempted && !matches!(status, Some(Status::Available | Status::NotFound)) {
                 warnings.push(warning);
@@ -309,6 +335,7 @@ impl Engine {
             hardware,
             network,
             active_network: active,
+            harness,
             tools: facts,
             warnings,
             requested,
@@ -327,7 +354,10 @@ impl Engine {
             })
             .map_err(|_| "could not render the environment report")
         } else {
-            Ok(brief(&snapshot))
+            Ok(brief(
+                &snapshot,
+                usize::from(request.brief_tokens.unwrap_or(model::DEFAULT_BRIEF_TOKENS)),
+            ))
         }
     }
 }
@@ -384,85 +414,103 @@ fn directory(input: Option<PathBuf>) -> Result<PathBuf, &'static str> {
     Ok(directory)
 }
 
-fn brief(snapshot: &Snapshot<'_>) -> String {
+// Priorities (lower is kept longer): 1 execution boundary and project path, 2 preflight
+// blockers and access/trust restrictions, 3 harness identity or ambiguity, 4 configured
+// model, 5 capability inventory, 6 warnings and caveats, 7 secondary context.
+fn brief(snapshot: &Snapshot<'_>, budget: usize) -> String {
     let mut lines = Vec::new();
     if let Some(system) = &snapshot.system {
         lines.push(platform_brief::system(&system.data));
     }
-    let mut cwd = format!(
-        "cwd={} source={}",
-        safe::brief_path(&snapshot.cwd.value),
-        snapshot.cwd.source
+    let mut cwd = Line::new(
+        1,
+        format!(
+            "cwd={} source={}",
+            safe::brief_path(&snapshot.cwd.value),
+            snapshot.cwd.source
+        ),
     );
     if let Some(p) = &snapshot.project {
         if !p.data.stacks.is_empty() {
-            cwd.push_str(&format!(" project={}", p.data.stacks.join("+")));
+            cwd.push(3, format!("project={}", p.data.stacks.join("+")));
         }
         if let Some(manager) = &p.data.package_manager {
-            cwd.push_str(&format!(" manager={manager}"));
+            cwd.push(3, format!("manager={manager}"));
         }
     }
     lines.push(cwd);
+    if let Some(harness) = &snapshot.harness {
+        // The default brief names a few declarations per kind; a focused scope or a
+        // larger budget lists every known name.
+        let all_names = matches!(snapshot.scope, Scope::Harness | Scope::All) || budget >= 1200;
+        lines.extend(harness.data.brief(all_names));
+    }
     if !snapshot.tools.is_empty() {
-        let items = snapshot
-            .tools
-            .iter()
-            .filter(|(name, _)| {
-                !snapshot
-                    .requested
-                    .is_some_and(|r| r.iter().any(|t| t.0 == **name))
-            })
-            .map(|(name, f)| format!("{name}:{}", tool_label(name, f, false)))
-            .collect::<Vec<_>>();
-        if !items.is_empty() {
-            lines.push(format!("tools={}", items.join(" ")));
+        let mut tools = Line::list("tools=", " ");
+        for (name, f) in snapshot.tools.iter().filter(|(name, _)| {
+            !snapshot
+                .requested
+                .is_some_and(|r| r.iter().any(|t| t.0 == **name))
+        }) {
+            tools.push(7, format!("{name}:{}", tool_label(name, f, false)));
         }
+        lines.push(tools);
     }
     if let Some(requires) = snapshot.requested {
         let pf = tools::preflight(&snapshot.tools, requires);
-        let reqs = pf
-            .requirements
-            .iter()
-            .map(|item| {
-                format!(
-                    "{}:{}",
-                    item.name,
-                    tool_label(item.name, item.evidence, true)
-                )
-            })
-            .collect::<Vec<_>>();
-        lines.push(if reqs.is_empty() {
-            "preflight=ready(no_requirements)".to_owned()
+        if pf.requirements.is_empty() {
+            lines.push(Line::new(2, "preflight=ready(no_requirements)"));
         } else {
-            format!("preflight={} items={}", pf.status.label(), reqs.join(","))
-        });
+            let mut line =
+                Line::new(2, format!("preflight={}", pf.status.label())).joined(" items=", ",");
+            for item in &pf.requirements {
+                let priority = if item.evidence.outcome == tools::Outcome::Ready {
+                    3
+                } else {
+                    2
+                };
+                line.push(
+                    priority,
+                    format!(
+                        "{}:{}",
+                        item.name,
+                        tool_label(item.name, item.evidence, true)
+                    ),
+                );
+            }
+            lines.push(line);
+        }
     }
-    let mut context = Vec::new();
+    let mut context = Line::list("", " ");
     if let Some(network) = &snapshot.network {
-        context.push(format!(
-            "proxy={} dns={}",
-            network.data.proxy, network.data.dns
-        ));
+        context.push(
+            7,
+            format!("proxy={} dns={}", network.data.proxy, network.data.dns),
+        );
         if network.data.vpn == "tunnel_interface_observed" {
-            context.push("tunnel=observed".into());
+            context.push(7, "tunnel=observed");
         }
     }
     if let Some(hardware) = &snapshot.hardware {
-        context.push(platform_brief::hardware(&hardware.data));
+        context.push(7, platform_brief::hardware(&hardware.data));
     }
-    if !context.is_empty() {
-        lines.push(context.join(" "));
-    }
+    lines.push(context);
     if let Some(active) = &snapshot.active_network {
-        lines.push(format!(
-            "example.com dns={} https={} route={}",
-            active.data.dns.result, active.data.https.result, active.data.route
+        lines.push(Line::new(
+            2,
+            format!(
+                "example.com dns={} https={} route={}",
+                active.data.dns.result, active.data.https.result, active.data.route
+            ),
         ));
     }
     if !snapshot.warnings.is_empty() {
-        lines.push(format!("partial={}", snapshot.warnings.join(",")));
+        lines.push(Line::new(
+            6,
+            format!("partial={}", snapshot.warnings.join(",")),
+        ));
     }
-    lines.join("\n")
+    brief::render(lines, budget)
 }
 
 fn tool_label(name: &str, f: &tools::Fact, preflight: bool) -> String {
@@ -495,26 +543,29 @@ fn tool_label(name: &str, f: &tools::Fact, preflight: bool) -> String {
 
 mod platform_brief {
     use super::*;
-    pub(super) fn system(data: &platform::System) -> String {
-        let mut text = format!(
-            "os={}/{} exec={} shell=unknown access={}",
-            data.os, data.process_arch, data.execution, data.privilege
+    pub(super) fn system(data: &platform::System) -> Line {
+        let mut line = Line::new(
+            1,
+            format!(
+                "os={}/{} exec={} shell=unknown access={}",
+                data.os, data.process_arch, data.execution, data.privilege
+            ),
         );
         if data.cwd_access == "not_writable_estimate" {
-            text.push_str(" cwd_write=denied_estimate");
+            line.push(2, "cwd_write=denied_estimate");
         }
         if data.ssh_indicator {
-            text.push_str(" ssh=indicator");
+            line.push(1, "ssh=indicator");
         }
         if data.ci_indicator {
-            text.push_str(" ci=indicator");
+            line.push(3, "ci=indicator");
         }
         if let Some(dev) = &data.developer
             && dev.kind != "unknown"
         {
-            text.push_str(&format!(" developer={}", dev.kind));
+            line.push(7, format!("developer={}", dev.kind));
         }
-        text
+        line
     }
     pub(super) fn hardware(data: &platform::Hardware) -> String {
         let cpus = data
