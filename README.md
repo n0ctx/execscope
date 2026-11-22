@@ -32,9 +32,9 @@ No arguments and `inspect` use the same defaults (`auto`, `brief`). `cwd` defaul
 
 | Scope | Coverage | Outbound diagnostics |
 | --- | --- | --- |
-| `auto` | Local process, project and relevant tools, access, effective hardware, passive network, and the harness linked to this process | No |
+| `auto` | Local process, project and relevant tools plus git, node and python, access, effective hardware, passive network, and the harness linked to this process | No |
 | `system` | OS, process and execution context, privileges and directory access estimate | No |
-| `dev` | Project, relevant tools and process context | No |
+| `dev` | Project, relevant tools plus git, node and python, and process context | No |
 | `hardware` | CPU, memory, mount free space and available accelerator indicators | No |
 | `network` | Local proxy/DNS configuration and explicit fixed-target checks | Yes |
 | `harness` | Process context plus every bounded harness candidate: linked, configured or installed | No |

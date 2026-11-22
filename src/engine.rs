@@ -234,6 +234,7 @@ impl Engine {
             relevant_project,
             deep,
             scope == Scope::All,
+            matches!(scope, Scope::Auto | Scope::Dev),
             requested.unwrap_or_default(),
         );
         let collect_tools = tools::collect(

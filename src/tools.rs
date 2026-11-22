@@ -191,15 +191,25 @@ pub(crate) fn preflight<'a>(
     }
 }
 
+/// Everyday tools an agent may reach for in any directory, reported even when the
+/// project does not call for them.
+pub(crate) const BASELINE: &[&str] = &["git", "node", "python"];
+
 pub(crate) fn relevant(
     project: Option<&Project>,
     full: bool,
     all: bool,
+    baseline: bool,
     requires: &[Tool],
 ) -> Vec<&'static str> {
     let mut names = Vec::new();
     for &Tool(name) in requires {
         push(&mut names, name);
+    }
+    if baseline {
+        for name in BASELINE {
+            push(&mut names, name);
+        }
     }
     if all {
         for name in crate::model::TOOLS {
@@ -613,5 +623,21 @@ fn timeout_fact() -> Fact {
         probe_sampled_at: None,
         probe_cached: false,
         outcome: Outcome::Unverified,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baseline_tools_are_added_once_and_only_when_asked() {
+        assert_eq!(relevant(None, false, false, true, &[]), BASELINE);
+        assert!(relevant(None, false, false, false, &[]).is_empty());
+        let requires = [Tool("node"), Tool("uv")];
+        assert_eq!(
+            relevant(None, false, false, true, &requires),
+            ["node", "uv", "git", "python"]
+        );
     }
 }
