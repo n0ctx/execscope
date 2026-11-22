@@ -22,7 +22,7 @@ use std::{
 
 const MAX_CANDIDATES: usize = 12;
 /// Total configuration files and directories read in one inspection.
-const MAX_READS: usize = 160;
+const MAX_READS: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,7 +105,7 @@ impl Capabilities {
             .cloned()
             .collect();
         slot.disabled = slot.all.disabled.clone();
-        slot.limited = slot.all.limited || slot.all.names.len() > config::MAX_NAMES;
+        slot.limited = slot.all.limited;
     }
 
     fn is_empty(&self) -> bool {
@@ -251,10 +251,12 @@ fn collect(cwd: &Path, context: Context, env: &Env, signatures: &[Signature]) ->
     let mut reads = MAX_READS;
     let mut bundles = HashMap::new();
     let mut found: Vec<Candidate> = Vec::new();
+    // Resolve each ancestor's paths once, not once per signature.
+    let ancestors: Vec<Resolved> = env.ancestry.chain.iter().map(resolve_ancestor).collect();
     for sig in signatures {
         let mut candidate: Option<Candidate> = None;
         // 1. Process ancestry: the nearest matching ancestor.
-        for (distance, ancestor) in env.ancestry.chain.iter().enumerate() {
+        for (distance, ancestor) in ancestors.iter().enumerate() {
             if let Some(hit) = identify(sig, ancestor, &mut bundles) {
                 candidate = Some(new_candidate(
                     sig,
@@ -285,10 +287,11 @@ fn collect(cwd: &Path, context: Context, env: &Env, signatures: &[Signature]) ->
                 }
             }
         }
-        let root = home_root(sig, env);
+        // Cheap auto mode touches no files of an unlinked product.
         if candidate.is_none() && !context.focused {
             continue;
         }
+        let root = home_root(sig, env);
         // 3. Configured: product-specific files in the product's own root.
         let configured = root.as_ref().is_some_and(|r| {
             sig.markers.iter().any(|m| {
@@ -374,6 +377,13 @@ fn collect(cwd: &Path, context: Context, env: &Env, signatures: &[Signature]) ->
     let mut notes = Vec::new();
     if env.ancestry.unavailable {
         notes.push("process_ancestry_unavailable");
+    } else if env.ancestry.incomplete {
+        notes.push("process_ancestry_incomplete");
+    }
+    if association == "environment_hint" {
+        // Such variables are inherited, so a long-lived daemon started from a harness
+        // shell can still carry them after the harness exits.
+        notes.push("association_from_inherited_environment_only");
     }
     if linked.len() > 1 {
         notes.push(if primary.is_some() {
@@ -385,7 +395,7 @@ fn collect(cwd: &Path, context: Context, env: &Env, signatures: &[Signature]) ->
     if context.mcp_server {
         notes.push("mcp_server_context_not_caller_session");
     }
-    let project = config::project_dirs(cwd);
+    let project = config::project_dirs(cwd, env.home.as_deref());
     for c in &mut found {
         // Cheap auto mode extracts configuration only for the associated harness.
         if !context.focused && c.presence != Presence::ProcessLinked {
@@ -453,32 +463,36 @@ fn normalized(path: &Path) -> String {
     }
 }
 
-fn basename(path: &Path) -> Option<String> {
+/// File name without a `.exe` suffix, case preserved: `Claude.exe` (Claude Desktop) is
+/// not `claude` (Claude Code) on case-insensitive Windows either.
+fn basename(path: &Path) -> Option<&str> {
     let name = path.file_name()?.to_str()?;
-    let name = if cfg!(windows) {
-        name.to_ascii_lowercase()
-    } else {
-        name.to_owned()
-    };
-    Some(name.strip_suffix(".exe").map(str::to_owned).unwrap_or(name))
+    Some(match name.len().checked_sub(4) {
+        Some(cut) if name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(".exe") => {
+            &name[..cut]
+        }
+        _ => name,
+    })
 }
 
 const INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3", "ruby"];
 
 fn is_interpreter(name: &str) -> bool {
-    INTERPRETERS.contains(&name)
+    let name = name.to_ascii_lowercase();
+    INTERPRETERS.contains(&name.as_str())
         || name
             .strip_prefix("python3.")
             .is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Matches one ancestor against a signature using its executable path, and for
-/// interpreter launches the resolved script path.
-fn identify(
-    sig: &Signature,
-    ancestor: &process::Ancestor,
-    bundles: &mut Bundles,
-) -> Option<Hit> {
+/// An ancestor's executable and, for interpreter launches, its resolved script.
+struct Resolved {
+    exe: Option<PathBuf>,
+    paths: Vec<PathBuf>,
+    args: Vec<String>,
+}
+
+fn resolve_ancestor(ancestor: &process::Ancestor) -> Resolved {
     let exe = ancestor.exe.clone().or_else(|| {
         ancestor
             .args
@@ -489,7 +503,7 @@ fn identify(
     let mut paths = Vec::new();
     if let Some(exe) = &exe {
         paths.push(exe.clone());
-        if basename(exe).is_some_and(|n| is_interpreter(&n))
+        if basename(exe).is_some_and(is_interpreter)
             && let Some(script) = ancestor
                 .args
                 .iter()
@@ -501,13 +515,23 @@ fn identify(
             paths.push(std::fs::canonicalize(&script).unwrap_or(script));
         }
     }
+    Resolved {
+        exe,
+        paths,
+        args: ancestor.args.clone(),
+    }
+}
+
+/// Matches one ancestor against a signature by product path markers or bundle
+/// identifier, then by a distinctive executable name.
+fn identify(sig: &Signature, ancestor: &Resolved, bundles: &mut Bundles) -> Option<Hit> {
     let surface = |default: &'static str| {
         sig.arg_surfaces
             .iter()
             .find(|(token, _)| ancestor.args.iter().skip(1).any(|a| a == token))
             .map_or(default, |(_, s)| s)
     };
-    for path in &paths {
+    for path in &ancestor.paths {
         if let Some(hit) = by_path(sig, path, bundles) {
             return Some(Hit {
                 evidence: "process_ancestor",
@@ -516,9 +540,8 @@ fn identify(
             });
         }
     }
-    let exe = exe?;
-    let name = basename(&exe)?;
-    sig.names.contains(&name.as_str()).then(|| Hit {
+    let name = basename(ancestor.exe.as_deref()?)?;
+    sig.names.contains(&name).then(|| Hit {
         evidence: "process_ancestor",
         surface: surface(sig.surface),
         version: None,
@@ -526,11 +549,7 @@ fn identify(
 }
 
 /// Product-specific path markers or a verified application bundle.
-fn by_path(
-    sig: &Signature,
-    path: &Path,
-    bundles: &mut Bundles,
-) -> Option<Hit> {
+fn by_path(sig: &Signature, path: &Path, bundles: &mut Bundles) -> Option<Hit> {
     // Inside an application bundle the bundle identifier decides, so a renamed or
     // unrelated app cannot match by folder name; unreadable metadata falls back to paths.
     if let Some(app) = path
@@ -630,12 +649,7 @@ fn installed_version(path: &Path, key: &str) -> Option<Version> {
     })
 }
 
-fn installed(
-    sig: &Signature,
-    env: &Env,
-    bundles: &mut Bundles,
-    reads: &mut usize,
-) -> Option<Hit> {
+fn installed(sig: &Signature, env: &Env, bundles: &mut Bundles, reads: &mut usize) -> Option<Hit> {
     for command in sig.commands {
         if *reads == 0 {
             return None;
@@ -714,6 +728,14 @@ pub(crate) struct Extraction<'a> {
     model: Option<ConfiguredModel>,
     /// Disable markers applied after every source has been read.
     disabled: Vec<(Cap, String)>,
+    /// Restriction settings by label: the first scalar wins (sources arrive in
+    /// precedence order); rule lists from several layers add up.
+    limits: Vec<(&'static str, Limit)>,
+}
+
+enum Limit {
+    Value(String),
+    Count(usize),
 }
 
 impl Extraction<'_> {
@@ -852,17 +874,23 @@ impl Extraction<'_> {
                 }
             }
         }
+        // An ineligible (untrusted or unverified) project's restrictions do not apply.
+        if source.scope == Scope::Project && !self.project_eligible {
+            return;
+        }
         for (key, label) in f.limits {
-            match config::get(&value, key) {
-                Some(serde_json::Value::Array(a)) if !a.is_empty() => {
-                    self.constraint(format!("{label}={}", a.len()))
-                }
-                Some(v) => {
-                    if let Some(s) = config::scalar(v) {
-                        self.constraint(format!("{label}={s}"));
-                    }
-                }
-                None => {}
+            let found = match config::get(&value, key) {
+                Some(serde_json::Value::Array(a)) if !a.is_empty() => Limit::Count(a.len()),
+                Some(v) => match config::scalar(v) {
+                    Some(s) => Limit::Value(s),
+                    None => continue,
+                },
+                None => continue,
+            };
+            match (self.limits.iter_mut().find(|(l, _)| l == label), found) {
+                (None, found) => self.limits.push((label, found)),
+                (Some((_, Limit::Count(n))), Limit::Count(more)) => *n += more,
+                (Some(_), _) => {}
             }
         }
     }
@@ -880,6 +908,7 @@ fn extract(sig: &Signature, c: &mut Candidate, project: &[PathBuf], env: &Env, r
         project_found: false,
         model: None,
         disabled: vec![],
+        limits: vec![],
     };
     let trust = match sig.trust {
         Trust::NotApplicable => None,
@@ -929,6 +958,12 @@ fn extract(sig: &Signature, c: &mut Candidate, project: &[PathBuf], env: &Env, r
         special(&mut x);
     }
     x.apply_disabled();
+    for (label, limit) in std::mem::take(&mut x.limits) {
+        x.constraint(match limit {
+            Limit::Value(v) => format!("{label}={v}"),
+            Limit::Count(n) => format!("{label}={n}"),
+        });
+    }
     // A documented environment override wins over files for new sessions.
     if let Some(value) = sig
         .model_env

@@ -153,6 +153,53 @@ const PI_SETTINGS: Fields = Fields {
     ..NONE
 };
 
+// Claude Code reads the same keys at every settings layer.
+const CLAUDE_SETTINGS: Fields = Fields {
+    model: &["model"],
+    thinking: &["effortLevel"],
+    extensions: &["enabledPlugins"],
+    limits: &[
+        ("permissions.defaultMode", "permission_mode"),
+        ("permissions.deny", "denied_tool_rules"),
+    ],
+    ..NONE
+};
+
+// Plugins are a user-level setting in Codex; project config shares the rest.
+const CODEX_PROJECT: Fields = Fields {
+    provider: &["model_provider"],
+    model: &["model"],
+    thinking: &["model_reasoning_effort"],
+    mcp: &["mcp_servers"],
+    limits: &[("sandbox_mode", "sandbox"), ("approval_policy", "approval")],
+    ..NONE
+};
+
+const CODEX_USER: Fields = Fields {
+    extensions: &["plugins"],
+    ..CODEX_PROJECT
+};
+
+const GEMINI_SETTINGS: Fields = Fields {
+    model: &["model.name"],
+    mcp: &["mcpServers"],
+    limits: &[
+        ("general.defaultApprovalMode", "approval"),
+        ("tools.sandbox", "sandbox"),
+    ],
+    ..NONE
+};
+
+const ZCODE_MCP: Fields = Fields {
+    mcp: &["mcp.servers"],
+    ..NONE
+};
+
+const AMP_MCP: Fields = Fields {
+    mcp: &["amp.mcpServers"],
+    ..NONE
+};
+
 // V1 `agent`/`plugin` and V2 `agents`/`plugins`; MCP shapes differ (see `opencode_mcp`).
 const OPENCODE: Fields = Fields {
     model: &["model"],
@@ -245,48 +292,9 @@ pub(crate) static SIGNATURES: &[Signature] = &[
         markers: &["settings.json", "agents", "plugins/installed_plugins.json"],
         model_env: &["ANTHROPIC_MODEL"],
         sources: &[
-            project(
-                ".claude/settings.local.json",
-                Json,
-                &Fields {
-                    model: &["model"],
-                    thinking: &["effortLevel"],
-                    extensions: &["enabledPlugins"],
-                    limits: &[
-                        ("permissions.defaultMode", "permission_mode"),
-                        ("permissions.deny", "denied_tool_rules"),
-                    ],
-                    ..NONE
-                },
-            ),
-            project(
-                ".claude/settings.json",
-                Json,
-                &Fields {
-                    model: &["model"],
-                    thinking: &["effortLevel"],
-                    extensions: &["enabledPlugins"],
-                    limits: &[
-                        ("permissions.defaultMode", "permission_mode"),
-                        ("permissions.deny", "denied_tool_rules"),
-                    ],
-                    ..NONE
-                },
-            ),
-            user(
-                "settings.json",
-                Json,
-                &Fields {
-                    model: &["model"],
-                    thinking: &["effortLevel"],
-                    extensions: &["enabledPlugins"],
-                    limits: &[
-                        ("permissions.defaultMode", "permission_mode"),
-                        ("permissions.deny", "denied_tool_rules"),
-                    ],
-                    ..NONE
-                },
-            ),
+            project(".claude/settings.local.json", Json, &CLAUDE_SETTINGS),
+            project(".claude/settings.json", Json, &CLAUDE_SETTINGS),
+            user("settings.json", Json, &CLAUDE_SETTINGS),
             project(".mcp.json", Json, &MCP),
         ],
         inventories: &[
@@ -314,31 +322,8 @@ pub(crate) static SIGNATURES: &[Signature] = &[
         markers: &["config.toml"],
         version_file: Some(("packages/standalone/current/codex-package.json", "version")),
         sources: &[
-            project(
-                ".codex/config.toml",
-                Toml,
-                &Fields {
-                    provider: &["model_provider"],
-                    model: &["model"],
-                    thinking: &["model_reasoning_effort"],
-                    mcp: &["mcp_servers"],
-                    limits: &[("sandbox_mode", "sandbox"), ("approval_policy", "approval")],
-                    ..NONE
-                },
-            ),
-            user(
-                "config.toml",
-                Toml,
-                &Fields {
-                    provider: &["model_provider"],
-                    model: &["model"],
-                    thinking: &["model_reasoning_effort"],
-                    mcp: &["mcp_servers"],
-                    extensions: &["plugins"],
-                    limits: &[("sandbox_mode", "sandbox"), ("approval_policy", "approval")],
-                    ..NONE
-                },
-            ),
+            project(".codex/config.toml", Toml, &CODEX_PROJECT),
+            user("config.toml", Toml, &CODEX_USER),
         ],
         inventories: &[
             inv(U, "skills", Skills, SKILLS),
@@ -366,32 +351,8 @@ pub(crate) static SIGNATURES: &[Signature] = &[
         markers: &["settings.json", "trustedFolders.json", "extensions"],
         model_env: &["GEMINI_MODEL"],
         sources: &[
-            project(
-                ".gemini/settings.json",
-                Json,
-                &Fields {
-                    model: &["model.name"],
-                    mcp: &["mcpServers"],
-                    limits: &[
-                        ("general.defaultApprovalMode", "approval"),
-                        ("tools.sandbox", "sandbox"),
-                    ],
-                    ..NONE
-                },
-            ),
-            user(
-                "settings.json",
-                Json,
-                &Fields {
-                    model: &["model.name"],
-                    mcp: &["mcpServers"],
-                    limits: &[
-                        ("general.defaultApprovalMode", "approval"),
-                        ("tools.sandbox", "sandbox"),
-                    ],
-                    ..NONE
-                },
-            ),
+            project(".gemini/settings.json", Json, &GEMINI_SETTINGS),
+            user("settings.json", Json, &GEMINI_SETTINGS),
         ],
         inventories: &[
             inv(U, "skills", Skills, SKILLS),
@@ -724,22 +685,8 @@ pub(crate) static SIGNATURES: &[Signature] = &[
                     ..NONE
                 },
             ),
-            project(
-                "zcode.json",
-                Json,
-                &Fields {
-                    mcp: &["mcp.servers"],
-                    ..NONE
-                },
-            ),
-            project(
-                ".zcode/config.json",
-                Json,
-                &Fields {
-                    mcp: &["mcp.servers"],
-                    ..NONE
-                },
-            ),
+            project("zcode.json", Json, &ZCODE_MCP),
+            project(".zcode/config.json", Json, &ZCODE_MCP),
         ],
         inventories: &[
             inv(U, "skills", Skills, SKILLS),
@@ -1003,22 +950,8 @@ pub(crate) static SIGNATURES: &[Signature] = &[
         },
         markers: &["settings.json", "settings.jsonc"],
         sources: &[
-            user(
-                "settings.json",
-                Json,
-                &Fields {
-                    mcp: &["amp.mcpServers"],
-                    ..NONE
-                },
-            ),
-            project(
-                ".amp/settings.json",
-                Json,
-                &Fields {
-                    mcp: &["amp.mcpServers"],
-                    ..NONE
-                },
-            ),
+            user("settings.json", Json, &AMP_MCP),
+            project(".amp/settings.json", Json, &AMP_MCP),
         ],
         inventories: &[
             inv(U, "skills", Skills, SKILLS),
@@ -1047,11 +980,20 @@ pub(crate) static SIGNATURES: &[Signature] = &[
 
 // ---- Product-specific hooks -------------------------------------------------
 
+/// Spellings under which harnesses record a project directory. On Windows the
+/// canonical `\\?\C:\...` form is also offered as `C:\...` and `C:/...`.
 fn project_keys(x: &Extraction<'_>) -> Vec<String> {
-    x.project
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect()
+    let mut keys = Vec::new();
+    for dir in x.project {
+        let text = dir.to_string_lossy().into_owned();
+        if cfg!(windows) {
+            let plain = text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned();
+            keys.push(plain.replace('\\', "/"));
+            keys.push(plain);
+        }
+        keys.push(text);
+    }
+    keys
 }
 
 /// Claude Code keeps user/local MCP declarations and per-project trust in
@@ -1092,7 +1034,12 @@ fn claude_state(x: &mut Extraction<'_>) -> Option<bool> {
         if let Some(rejected) = entry.get("disabledMcpServers") {
             x.mark_disabled(Mcp, &config::declared(rejected).names);
         }
-        trusted = trusted.or(entry.get("hasTrustDialogAccepted").and_then(Value::as_bool));
+        // Trust accepted for an enclosing project covers this directory.
+        match entry.get("hasTrustDialogAccepted").and_then(Value::as_bool) {
+            Some(true) => trusted = Some(true),
+            Some(false) if trusted.is_none() => trusted = Some(false),
+            _ => {}
+        }
     }
     trusted
 }
@@ -1159,6 +1106,8 @@ fn codex_profile(x: &mut Extraction<'_>) {
     }
 }
 
+/// `TRUST_FOLDER` trusts a directory and everything below it, `TRUST_PARENT` trusts
+/// the entry's parent, and an exact `DO_NOT_TRUST` entry distrusts the directory.
 fn gemini_trust(x: &mut Extraction<'_>) -> Option<bool> {
     let root = x.root?.to_owned();
     let path = x
@@ -1170,16 +1119,23 @@ fn gemini_trust(x: &mut Extraction<'_>) -> Option<bool> {
         return None;
     };
     let keys = project_keys(x);
-    for (i, key) in keys.iter().enumerate() {
-        match folders.get(key).and_then(Value::as_str) {
-            Some("TRUST_FOLDER") => return Some(true),
-            Some("DO_NOT_TRUST") => return Some(false),
-            // TRUST_PARENT on the project trusts its parent, not this directory.
-            Some("TRUST_PARENT") if i > 0 => return Some(true),
+    // The first key is the cwd in the platform's plain spelling.
+    let cwd = PathBuf::from(keys.first()?);
+    let mut trusted = None;
+    for (entry, value) in folders.iter().take(config::MAX_DIR_ENTRIES * 4) {
+        let entry = Path::new(entry);
+        match value.as_str() {
+            Some("DO_NOT_TRUST") if keys.iter().any(|k| Path::new(k) == entry) => {
+                return Some(false);
+            }
+            Some("TRUST_FOLDER") if cwd.starts_with(entry) => trusted = Some(true),
+            Some("TRUST_PARENT") if entry.parent().is_some_and(|p| cwd.starts_with(p)) => {
+                trusted = Some(true)
+            }
             _ => {}
         }
     }
-    None
+    trusted
 }
 
 fn antigravity_trust(x: &mut Extraction<'_>) -> Option<bool> {

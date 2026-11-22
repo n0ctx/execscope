@@ -195,11 +195,26 @@ fn yaml(text: &str) -> Option<Value> {
                     .collect(),
             );
         }
-        match raw {
-            "true" | "True" | "yes" => Value::Bool(true),
-            "false" | "False" | "no" => Value::Bool(false),
+        if raw.starts_with('{') && raw.ends_with('}') {
+            let inner = &raw[1..raw.len() - 1];
+            // Single-level flow mappings only; nested flow syntax is not guessed.
+            if inner.contains(['{', '[']) {
+                return Value::Null;
+            }
+            let mut map = Map::new();
+            for pair in inner.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                let Some((key, value)) = pair.split_once(':') else {
+                    return Value::Null;
+                };
+                map.insert(unquote(key), scalar(value));
+            }
+            return Value::Object(map);
+        }
+        // YAML 1.1 and 1.2 boolean spellings.
+        match raw.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" => Value::Bool(true),
+            "false" | "no" | "off" => Value::Bool(false),
             "null" | "~" | "" => Value::Null,
-            "{}" => Value::Object(Map::new()),
             _ => Value::String(unquote(raw)),
         }
     }
@@ -321,6 +336,16 @@ fn yaml(text: &str) -> Option<Value> {
             }
             continue;
         }
+        // A mapping line ends an "indentless" list written at its key's indent.
+        while stack.len() > 1
+            && stack
+                .last()
+                .is_some_and(|f| f.value.is_array() && indent <= f.indent)
+        {
+            let done = stack.pop()?;
+            attach(stack.last_mut()?, done.value);
+        }
+        let top = stack.last_mut()?;
         let Some((key, rest)) = split_key(body) else {
             continue;
         };
@@ -467,7 +492,10 @@ pub(crate) fn declared(value: &Value) -> Names {
             for item in items.iter().take(MAX_DIR_ENTRIES) {
                 match item {
                     Value::String(s) => names.add(s, false),
-                    Value::Object(_) => match get(item, "name").and_then(Value::as_str) {
+                    Value::Object(_) => match ["name", "id", "source", "package"]
+                        .iter()
+                        .find_map(|k| get(item, k).and_then(Value::as_str))
+                    {
                         Some(name) => names.add(name, is_disabled(item)),
                         None => names.unnamed += 1,
                     },
@@ -538,6 +566,11 @@ pub(crate) fn entries(dir: &Path, kind: Entries) -> Option<Result<Names, ()>> {
                 (meta.is_dir() && path.join("SKILL.md").is_file()).then_some(name)
             }
             Entries::SkillTree if meta.is_dir() && !path.join("SKILL.md").is_file() => {
+                // Category folders share the one directory-entry budget.
+                if found.len() >= MAX_DIR_ENTRIES {
+                    limited = true;
+                    break;
+                }
                 if let Some(Ok(nested)) = entries(&path, Entries::SkillDirs) {
                     limited |= nested.limited;
                     found.extend(nested.names.into_iter().map(|n| (n, false)));
@@ -579,16 +612,26 @@ pub(crate) fn entries(dir: &Path, kind: Entries) -> Option<Result<Names, ()>> {
 
 /// Project roots consulted for project-level config: the directory itself and its
 /// ancestors up to the nearest VCS root (bounded).
-pub(crate) fn project_dirs(cwd: &Path) -> Vec<PathBuf> {
+///
+/// The home directory is never a project root: its dot-folders are user config, and
+/// reading them twice would also report a spurious project-trust state.
+pub(crate) fn project_dirs(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    let mut rooted = false;
     for dir in cwd.ancestors().take(8) {
+        if Some(dir) == home {
+            break;
+        }
         dirs.push(dir.to_owned());
         if dir.join(".git").exists() {
-            return dirs;
+            rooted = true;
+            break;
         }
     }
-    // Without a VCS root only the directory itself is a project root.
-    dirs.truncate(1);
+    if !rooted {
+        // Without a VCS root only the directory itself is a project root.
+        dirs.truncate(1);
+    }
     dirs
 }
 
@@ -636,6 +679,13 @@ mod tests {
         assert_eq!(list[0]["insert"][0]["config"]["model"], "m");
         assert_eq!(list[0]["insert"][1]["id"], "b");
         assert_eq!(list[1]["other"], "1");
+        // PyYAML's default style puts list items at the key's indent.
+        let pyyaml = "toolsets:\n- web\n- terminal\nmcp_servers:\n  docs:\n    args:\n    - -y\n    - pkg\n    enabled: false\n  b: {command: x, enabled: Off}\n  c:\n    enabled: NO\napprovals:\n  mode: manual\n";
+        let v = parse(pyyaml, Format::Yaml).unwrap();
+        assert_eq!(v["toolsets"], json!(["web", "terminal"]));
+        assert_eq!(v["mcp_servers"]["docs"]["args"], json!(["-y", "pkg"]));
+        assert_eq!(declared(&v["mcp_servers"]).disabled, ["b", "c", "docs"]);
+        assert_eq!(v["approvals"]["mode"], "manual");
     }
 
     #[test]

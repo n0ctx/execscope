@@ -109,6 +109,7 @@ impl Fixture {
             ancestry: process::Ancestry {
                 chain: self.chain.clone(),
                 unavailable: self.unavailable,
+                incomplete: false,
             },
             commands: Box::new(move |name| commands.get(name).cloned().unwrap_or_default()),
             app_dirs: vec![self.home.join("Applications")],
@@ -1242,8 +1243,178 @@ fn brief_budgets_keep_identity_first() {
     assert!(brief::estimate(&small) <= 100, "{small}");
     assert!(small.contains("harness=claude-code"), "{small}");
     assert!(small.contains("permission_mode=plan"), "{small}");
-    assert!(large.contains("declared_skills=40+"), "{large}");
+    assert!(large.contains("declared_skills=40 "), "{large}");
     assert!(large.len() > small.len());
     let compact = brief::render(h.brief(false), 600);
-    assert!(compact.contains("declared_skills=40+ skill-number-00-with-a-long-name,skill-number-01-with-a-long-name,skill-number-02-with-a-long-name\n"), "{compact}");
+    assert!(compact.contains("declared_skills=40 skill-number-00-with-a-long-name,skill-number-01-with-a-long-name,skill-number-02-with-a-long-name\n"), "{compact}");
+}
+
+// ---- Review regressions ------------------------------------------------------
+
+#[test]
+fn untrusted_project_restrictions_do_not_apply_and_labels_merge() {
+    let mut f = Fixture::new();
+    f.ancestor(".codex/packages/standalone/releases/1/bin/codex", &[]);
+    f.file(
+        ".codex/config.toml",
+        "sandbox_mode = \"read-only\"\napproval_policy = \"on-request\"\n",
+    );
+    f.project_file(
+        ".codex/config.toml",
+        "sandbox_mode = \"danger-full-access\"\napproval_policy = \"never\"\n",
+    );
+    let c = find(&f.run(false), "codex").clone();
+    assert_eq!(
+        c.constraints,
+        [
+            "sandbox=read-only",
+            "approval=on-request",
+            "project_trust_unverified"
+        ]
+    );
+    let mut g = Fixture::new();
+    g.ancestor(".local/share/claude/versions/2.1.330", &[]);
+    let project = g.project.to_string_lossy().into_owned();
+    g.file(
+        ".claude.json",
+        &serde_json::json!({"projects": {project: {"hasTrustDialogAccepted": true}}}).to_string(),
+    );
+    g.file(
+        ".claude/settings.json",
+        r#"{"permissions":{"defaultMode":"plan","deny":["a","b"]}}"#,
+    );
+    g.project_file(
+        ".claude/settings.json",
+        r#"{"permissions":{"defaultMode":"acceptEdits","deny":["c"]}}"#,
+    );
+    let c = find(&g.run(false), "claude-code").clone();
+    // Trusted project wins the scalar; deny rules from both layers add up.
+    assert_eq!(
+        c.constraints,
+        ["permission_mode=acceptEdits", "denied_tool_rules=3"]
+    );
+}
+
+#[test]
+fn home_directory_is_not_a_project() {
+    let mut f = Fixture::new();
+    f.ancestor(".codex/packages/standalone/releases/1/bin/codex", &[]);
+    f.file(".codex/config.toml", "model = \"m\"\n");
+    fs::create_dir_all(f.home.join(".git")).unwrap();
+    f.project = f.home.clone();
+    let c = find(&f.run(false), "codex").clone();
+    assert_eq!(model(&c).3, "user_config");
+    assert!(c.constraints.is_empty(), "{:?}", c.constraints);
+}
+
+#[test]
+fn paths_and_remotes_in_declarations_are_counted_not_printed() {
+    let mut f = Fixture::new();
+    f.var("PI_CODING_AGENT", "true");
+    f.file(
+        ".pi/agent/settings.json",
+        r#"{"defaultProvider":"/Users/alice/.ssh/id_rsa","defaultModel":"m","packages":["npm:@scope/ok",
+            "/Users/alice/clients/acme-secret/ext","git:git@github.com:alice/private-repo@v1","../../Users/alice/x.ts",
+            {"source":"npm:object-form"}]}"#,
+    );
+    let h = f.run(false);
+    let ext = find(&h, "pi").capabilities.extensions.clone().unwrap();
+    assert_eq!(ext.count, 5);
+    assert_eq!(ext.names, ["npm:@scope/ok", "npm:object-form"]);
+    assert_eq!(model(find(&h, "pi")).0, None);
+    let out = json(&h);
+    assert!(!out.contains("alice") && !out.contains("acme"), "{out}");
+}
+
+#[test]
+fn desktop_apps_named_like_clis_are_not_matched_by_name() {
+    assert_eq!(basename(Path::new("Claude.exe")), Some("Claude"));
+    assert_eq!(basename(Path::new("claude.EXE")), Some("claude"));
+    assert!(is_interpreter("Node") && is_interpreter("python3.13"));
+    let mut f = Fixture::new();
+    f.ancestor("Programs/Claude/Claude.exe", &[]);
+    f.ancestor("Programs/Codex/Codex.exe", &[]);
+    assert_eq!(f.run(false).primary, None);
+}
+
+#[test]
+fn pyyaml_style_hermes_config_keeps_later_sections() {
+    let mut f = Fixture::new();
+    f.var("HERMES_SESSION_ID", "s1");
+    f.file(
+        ".hermes/config.yaml",
+        "toolsets:\n- web\n- terminal\nmcp_servers:\n  docs:\n    args:\n    - -y\n    - pkg\n    enabled: false\n  web: {url: 'https://h', enabled: Off}\n  fs:\n    command: x\napprovals:\n  mode: manual\nmodel:\n  default: m\n",
+    );
+    let h = f.run(false);
+    let c = find(&h, "hermes");
+    assert_eq!(names(c, Cap::Mcp), ["docs", "fs", "web"]);
+    assert_eq!(
+        c.capabilities.mcp.as_ref().unwrap().disabled,
+        ["docs", "web"]
+    );
+    assert!(c.constraints.contains(&"approval=manual".to_owned()));
+    assert_eq!(model(c).1, Some("m"));
+    assert!(
+        h.notes
+            .contains(&"association_from_inherited_environment_only")
+    );
+}
+
+#[test]
+fn gemini_and_claude_trust_cover_enclosing_entries() {
+    let mut f = Fixture::new();
+    f.ancestor("/x/node_modules/@google/gemini-cli/bundle/gemini.js", &[]);
+    f.file(".gemini/settings.json", "{}");
+    f.project_file(".gemini/settings.json", r#"{"model":{"name":"p"}}"#);
+    let parent = f.project.parent().unwrap().to_string_lossy().into_owned();
+    let own = f.project.to_string_lossy().into_owned();
+    f.file(
+        ".gemini/trustedFolders.json",
+        &serde_json::json!({ own.clone(): "TRUST_PARENT" }).to_string(),
+    );
+    assert_eq!(model(find(&f.run(false), "gemini-cli")).1, Some("p"));
+    f.file(
+        ".gemini/trustedFolders.json",
+        &serde_json::json!({ parent.clone(): "TRUST_FOLDER" }).to_string(),
+    );
+    assert_eq!(model(find(&f.run(false), "gemini-cli")).1, Some("p"));
+    f.file(
+        ".gemini/trustedFolders.json",
+        &serde_json::json!({ parent: "TRUST_FOLDER", own: "DO_NOT_TRUST" }).to_string(),
+    );
+    assert!(
+        find(&f.run(false), "gemini-cli")
+            .constraints
+            .contains(&"project_untrusted".to_owned())
+    );
+
+    let mut g = Fixture::new();
+    g.ancestor(".local/share/claude/versions/2.1.330", &[]);
+    fs::create_dir_all(g.project.join("sub")).unwrap();
+    fs::remove_dir_all(g.project.join(".git")).unwrap();
+    fs::create_dir_all(g.home.join("work/.git")).unwrap();
+    g.project = g.project.join("sub");
+    let root = g.home.join("work").to_string_lossy().into_owned();
+    let cwd = g.project.to_string_lossy().into_owned();
+    g.file(
+        ".claude.json",
+        &serde_json::json!({"projects": {cwd: {"hasTrustDialogAccepted": false}, root: {"hasTrustDialogAccepted": true}}})
+            .to_string(),
+    );
+    g.project_file(".claude/settings.json", r#"{"model":"sonnet"}"#);
+    assert_eq!(model(find(&g.run(false), "claude-code")).1, Some("sonnet"));
+}
+
+#[test]
+fn openclaw_agent_list_ids_are_named() {
+    let mut f = Fixture::new();
+    f.var("OPENCLAW_CLI", "1");
+    f.file(
+        ".openclaw/openclaw.json",
+        "{agents:{list:[{id:'main'},{id:'helper'}]}}",
+    );
+    assert_eq!(
+        names(find(&f.run(false), "openclaw"), Cap::Subagents),
+        ["main", "helper"]
+    );
 }

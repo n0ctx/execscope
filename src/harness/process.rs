@@ -27,6 +27,8 @@ pub(crate) struct Ancestry {
     pub(crate) chain: Vec<Ancestor>,
     /// The platform offered no readable process table (for example, no `/proc`).
     pub(crate) unavailable: bool,
+    /// The walk stopped at an unreadable ancestor (for example, `/proc` hidepid).
+    pub(crate) incomplete: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
@@ -40,7 +42,9 @@ fn bounded_args(args: impl Iterator<Item = String>) -> Vec<String> {
 pub(crate) fn ancestry() -> Ancestry {
     let mut chain = Vec::new();
     let mut pid = unsafe { libc::getppid() };
-    while pid > 1 && chain.len() < MAX_ANCESTORS {
+    let mut args = vec![0u8; mac_argmax()];
+    // PID 1 is included: inside a container a harness can be the init process.
+    while pid >= 1 && chain.len() < MAX_ANCESTORS {
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
         let read = unsafe {
@@ -59,21 +63,47 @@ pub(crate) fn ancestry() -> Ancestry {
             .filter(|p| p.is_absolute());
         chain.push(Ancestor {
             exe,
-            args: mac_args(pid),
+            args: mac_args(pid, &mut args),
         });
+        if pid == 1 {
+            break;
+        }
         pid = info.pbi_ppid as libc::pid_t;
     }
     Ancestry {
         unavailable: chain.is_empty() && unsafe { libc::getppid() } > 1,
+        incomplete: false,
         chain,
     }
 }
 
+/// `KERN_ARGMAX` bounds a process's argument and environment area.
 #[cfg(target_os = "macos")]
-fn mac_args(pid: libc::pid_t) -> Vec<String> {
+fn mac_argmax() -> usize {
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let ok = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&raw mut value).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    usize::try_from(value)
+        .ok()
+        .filter(|v| ok && *v > 0)
+        .unwrap_or(256 * 1024)
+        .min(4 * 1024 * 1024)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_args(pid: libc::pid_t, buf: &mut [u8]) -> Vec<String> {
     // KERN_PROCARGS2: argc (i32), exec path, NUL padding, then argv strings.
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-    let mut buf = vec![0u8; 64 * 1024];
     let mut len = buf.len();
     let ok = unsafe {
         libc::sysctl(
@@ -88,8 +118,7 @@ fn mac_args(pid: libc::pid_t) -> Vec<String> {
     if !ok || len < 4 || len > buf.len() {
         return vec![];
     }
-    buf.truncate(len);
-    parse_procargs2(&buf)
+    parse_procargs2(&buf[..len])
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -123,16 +152,20 @@ pub(crate) fn ancestry() -> Ancestry {
         return Ancestry {
             chain: vec![],
             unavailable: true,
+            incomplete: false,
         };
     }
     let mut chain = Vec::new();
-    let mut pid = std::os::unix::process::parent_id() as i64;
-    while pid > 1 && chain.len() < MAX_ANCESTORS {
+    let mut incomplete = false;
+    let mut pid = i64::from(std::os::unix::process::parent_id());
+    // PID 1 is included: inside a container a harness can be the init process.
+    while pid >= 1 && chain.len() < MAX_ANCESTORS {
         let dir = proc.join(pid.to_string());
-        let Some(stat) = crate::safe::read(&dir.join("stat"), 4096) else {
-            break;
-        };
-        let Some(ppid) = linux_ppid(&stat) else {
+        let Some(ppid) = crate::safe::read(&dir.join("stat"), 4096)
+            .as_deref()
+            .and_then(linux_ppid)
+        else {
+            incomplete = true;
             break;
         };
         let exe = std::fs::read_link(dir.join("exe"))
@@ -156,10 +189,14 @@ pub(crate) fn ancestry() -> Ancestry {
             })
             .unwrap_or_default();
         chain.push(Ancestor { exe, args });
+        if pid == 1 {
+            break;
+        }
         pid = ppid;
     }
     Ancestry {
         unavailable: false,
+        incomplete,
         chain,
     }
 }
@@ -192,6 +229,7 @@ pub(crate) fn ancestry() -> Ancestry {
         return Ancestry {
             chain: vec![],
             unavailable: true,
+            incomplete: false,
         };
     }
     let mut parents = HashMap::new();
@@ -247,6 +285,7 @@ pub(crate) fn ancestry() -> Ancestry {
     }
     Ancestry {
         unavailable: false,
+        incomplete: false,
         chain,
     }
 }
@@ -256,6 +295,7 @@ pub(crate) fn ancestry() -> Ancestry {
     Ancestry {
         chain: vec![],
         unavailable: true,
+        incomplete: false,
     }
 }
 

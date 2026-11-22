@@ -64,16 +64,25 @@ fn secret_like(lower: &str) -> bool {
 
 /// A configuration-declared name or identifier (model, provider, MCP server, Skill)
 /// that is safe to print: letters/digits in any script plus `._-:@/+`, bounded length,
-/// no URL or credential-looking content.
+/// no URL, filesystem path, SSH remote or credential-looking content.
 pub(crate) fn identifier(input: &str, max_chars: usize) -> Option<String> {
     let value = input.trim();
     let lower = value.to_ascii_lowercase();
+    // `user@host:path` remotes; `npm:@scope/pkg` and `plugin@market` stay allowed.
+    let ssh_remote = value.match_indices('@').any(|(at, _)| {
+        let rest = &value[at + 1..];
+        rest.find(':')
+            .is_some_and(|colon| rest[..colon].contains('.'))
+    });
     (!value.is_empty()
         && value.chars().count() <= max_chars
         && value
             .chars()
             .all(|c| c.is_alphanumeric() || "._-:@/+".contains(c))
-        && !value.contains("://")
+        && !value.starts_with(['/', '.', '~'])
+        && !value.contains("..")
+        && !value.contains(":/")
+        && !ssh_remote
         && !secret_like(&lower))
     .then(|| value.to_owned())
 }
@@ -160,7 +169,29 @@ mod tests {
             Some("qwen3.8-27b")
         );
         assert_eq!(identifier("代码审查", 96).as_deref(), Some("代码审查"));
-        for bad in ["a b", "x;rm", "https://h", "sk-ant-abc", "", "\u{202e}x"] {
+        for ok in [
+            "npm:@scope/pkg",
+            "fmt@market",
+            "anthropic/claude-x",
+            "git:github.com/o/r",
+        ] {
+            assert!(identifier(ok, 96).is_some(), "{ok}");
+        }
+        for bad in [
+            "a b",
+            "x;rm",
+            "https://h",
+            "sk-ant-abc",
+            "",
+            "\u{202e}x",
+            "/Users/alice/x",
+            "../../x.ts",
+            "~/ext",
+            ".ssh/id_rsa",
+            "git@github.com:alice/private",
+            "git:git@github.com:alice/repo@v1",
+            "C:/Users/x",
+        ] {
             assert_eq!(identifier(bad, 96), None, "{bad}");
         }
         assert_eq!(identifier(&"a".repeat(65), 64), None);

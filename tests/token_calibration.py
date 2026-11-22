@@ -47,6 +47,9 @@ CORPUS = [
     "ZcxKqWvBnMtYpLrJsHgFdSaPoIuYtReWqAsDfGhJkLzXcVbNm",
     "一龥㐀䶿\U00020000\U0002a6df กข אב",
     "tabs\tand\nnewlines\n\nand  double  spaces",
+    "हिन्दी कौशल समीक्षा ሰላም ዓለም ትግርኛ",
+    "ไทย ภาษา ทักษะ ‘quoted’ — ellipsis… ™ ✓ → ⚠",
+    "㋿ ㊙ ﹏ ꙮ ꦲꦏ ᚠᚢᚦ ⠁⠃ ⅫⅣ",
 ]
 
 

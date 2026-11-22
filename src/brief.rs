@@ -179,16 +179,21 @@ pub(crate) fn estimate(text: &str) -> usize {
                 run.push(c as u8);
             }
             tokens += alphanumeric(&run);
-        } else if c == ' ' {
+        } else if c == ' ' && chars.peek().is_some_and(char::is_ascii_alphanumeric) {
             // A single space is usually merged into the following word.
         } else if c.is_ascii() {
             tokens += 1;
         } else {
-            // Common CJK is about one token per character; rare blocks and
-            // supplementary planes fall back to byte tokens.
+            // Common CJK, kana and Hangul are about one token per character.
+            // Other scripts, rare blocks and supplementary planes fall back
+            // towards byte tokens.
             tokens += match (c.len_utf8(), c) {
-                (3, '\u{3400}'..='\u{4dbf}') => 3,
-                (2 | 3, _) => 2,
+                (2, _) => 2,
+                (
+                    3,
+                    '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}' | '\u{ac00}'..='\u{d7af}',
+                ) => 2,
+                (3, _) => 3,
                 _ => 4,
             };
         }
