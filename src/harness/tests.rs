@@ -1418,3 +1418,25 @@ fn openclaw_agent_list_ids_are_named() {
         ["main", "helper"]
     );
 }
+
+#[test]
+fn gemini_relative_trust_entries_grant_nothing() {
+    for entry in ["", "work", "."] {
+        let mut f = Fixture::new();
+        f.ancestor("/x/node_modules/@google/gemini-cli/bundle/gemini.js", &[]);
+        f.file(".gemini/settings.json", "{}");
+        f.project_file(".gemini/settings.json", r#"{"model":{"name":"p"}}"#);
+        f.file(
+            ".gemini/trustedFolders.json",
+            &serde_json::json!({ entry: "TRUST_FOLDER", format!("{entry}x/y"): "TRUST_PARENT" })
+                .to_string(),
+        );
+        let c = find(&f.run(false), "gemini-cli").clone();
+        assert!(c.configured_model.is_none(), "{entry:?}");
+        assert!(
+            c.constraints
+                .contains(&"project_trust_unverified".to_owned()),
+            "{entry:?}"
+        );
+    }
+}

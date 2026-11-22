@@ -62,28 +62,102 @@ fn secret_like(lower: &str) -> bool {
     SECRET_MARKERS.iter().any(|p| lower.contains(p))
 }
 
+/// Prefixes of widely used credential formats, each followed by a long key body.
+const KEY_PREFIXES: &[&str] = &[
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "hf_",
+    "AIza",
+    "AKIA",
+    "eyJ",
+];
+
+/// Credential-shaped text: a known key prefix at a word start followed by 16+ key
+/// characters mixing letters and digits,
+/// or a 32+ character run mixing upper case, lower case and digits.
+fn key_like(value: &str) -> bool {
+    let key_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let prefixed = KEY_PREFIXES.iter().any(|prefix| {
+        value.match_indices(prefix).any(|(at, _)| {
+            let boundary = !value[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+            let body: String = value[at + prefix.len()..]
+                .chars()
+                .take_while(|c| key_char(*c))
+                .collect();
+            boundary
+                && body.len() >= 16
+                && body.bytes().any(|b| b.is_ascii_digit())
+                && body.bytes().any(|b| b.is_ascii_alphabetic())
+        })
+    });
+    prefixed
+        || value
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|run| {
+                run.len() >= 32
+                    && run.bytes().any(|b| b.is_ascii_uppercase())
+                    && run.bytes().any(|b| b.is_ascii_lowercase())
+                    && run.bytes().any(|b| b.is_ascii_digit())
+            })
+}
+
+/// First path components that mark a home or system directory written without its
+/// leading separator.
+const PATH_ROOTS: &[&str] = &[
+    "users", "home", "root", "private", "var", "tmp", "mnt", "media", "volumes", "opt", "usr",
+    "etc",
+];
+
 /// A configuration-declared name or identifier (model, provider, MCP server, Skill)
-/// that is safe to print: letters/digits in any script plus `._-:@/+`, bounded length,
-/// no URL, filesystem path, SSH remote or credential-looking content.
+/// that is safe to print: letters/digits in any script plus `._-:@/+[]`, bounded length,
+/// no URL, filesystem path, remote address, e-mail address or credential-looking content.
 pub(crate) fn identifier(input: &str, max_chars: usize) -> Option<String> {
     let value = input.trim();
     let lower = value.to_ascii_lowercase();
-    // `user@host:path` remotes; `npm:@scope/pkg` and `plugin@market` stay allowed.
-    let ssh_remote = value.match_indices('@').any(|(at, _)| {
+    // `user@host:path` remotes and `user@host.example` addresses (including
+    // `user:password@host`); `npm:@scope/pkg`, `pkg@1.2.3` and `plugin@market` stay allowed.
+    let address = value.match_indices('@').any(|(at, _)| {
         let rest = &value[at + 1..];
-        rest.find(':')
-            .is_some_and(|colon| rest[..colon].contains('.'))
+        let host = &rest[..rest.find(['/', ':']).unwrap_or(rest.len())];
+        let remote = rest
+            .find(':')
+            .is_some_and(|colon| !rest[..colon].contains('/'));
+        let domain = host.contains('.')
+            && host
+                .rsplit('.')
+                .next()
+                .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
+        remote || domain
     });
+    let rooted = value.contains('/')
+        && value
+            .split('/')
+            .next()
+            .is_some_and(|first| PATH_ROOTS.contains(&first.to_ascii_lowercase().as_str()));
     (!value.is_empty()
         && value.chars().count() <= max_chars
         && value
             .chars()
-            .all(|c| c.is_alphanumeric() || "._-:@/+".contains(c))
+            .all(|c| c.is_alphanumeric() || "._-:@/+[]".contains(c))
+        // `~` also starts `~user/...` home paths, so a leading tilde is never printed.
         && !value.starts_with(['/', '.', '~'])
         && !value.contains("..")
         && !value.contains(":/")
-        && !ssh_remote
-        && !secret_like(&lower))
+        && !address
+        && !rooted
+        && !secret_like(&lower)
+        && !key_like(value))
     .then(|| value.to_owned())
 }
 
@@ -174,6 +248,13 @@ mod tests {
             "fmt@market",
             "anthropic/claude-x",
             "git:github.com/o/r",
+            "opus[1m]",
+            "npm:pkg@1.2.3",
+            "openrouter/anthropic/claude-x",
+            "task-runner-for-everything-2",
+            "disk-usage-analyzer-v2-pro",
+            "hf_transfer",
+            "Users",
         ] {
             assert!(identifier(ok, 96).is_some(), "{ok}");
         }
@@ -191,6 +272,20 @@ mod tests {
             "git@github.com:alice/private",
             "git:git@github.com:alice/repo@v1",
             "C:/Users/x",
+            "alice:s3cr3t@example.com",
+            "alice@example.com",
+            "git@gh:alice/private",
+            "alice@mac-mini:code/repo",
+            "Users/alice/secret-project",
+            "home/alice/x",
+            "sk-or-v1-0123456789abcdef0123",
+            "sk-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKL",
+            "glpat-0123456789abcdefghij",
+            "hf_0123456789abcdefghijkl",
+            "AIzaSyA0123456789abcdefghij",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",
+            "key:Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0LmNb",
+            "~anthropic/claude-latest",
         ] {
             assert_eq!(identifier(bad, 96), None, "{bad}");
         }

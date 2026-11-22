@@ -179,23 +179,14 @@ pub(crate) fn estimate(text: &str) -> usize {
                 run.push(c as u8);
             }
             tokens += alphanumeric(&run);
-        } else if c == ' ' && chars.peek().is_some_and(char::is_ascii_alphanumeric) {
-            // A single space is usually merged into the following word.
+        } else if c == ' ' && chars.peek().is_some_and(char::is_ascii_alphabetic) {
+            // A single space merges into a following word, but not into digits.
         } else if c.is_ascii() {
             tokens += 1;
         } else {
-            // Common CJK, kana and Hangul are about one token per character.
-            // Other scripts, rare blocks and supplementary planes fall back
-            // towards byte tokens.
-            tokens += match (c.len_utf8(), c) {
-                (2, _) => 2,
-                (
-                    3,
-                    '\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}' | '\u{ac00}'..='\u{d7af}',
-                ) => 2,
-                (3, _) => 3,
-                _ => 4,
-            };
+            // Rare characters fall back to one token per UTF-8 byte, even in
+            // otherwise well-covered scripts such as CJK.
+            tokens += c.len_utf8();
         }
     }
     tokens
@@ -212,6 +203,13 @@ fn alphanumeric(run: &[u8]) -> usize {
         return (len * 3).div_ceil(4);
     }
     let vowels = run.iter().filter(|b| b"aeiouyAEIOUY".contains(b)).count();
+    let mut letters = [false; 128];
+    run.iter()
+        .for_each(|b| letters[usize::from(*b & 0x7f)] = true);
+    if letters.iter().filter(|seen| **seen).count() <= 2 {
+        // Repeated letters merge into long tokens.
+        return len.div_ceil(4) + 1;
+    }
     let switches = run
         .windows(2)
         .filter(|w| w[0].is_ascii_lowercase() != w[1].is_ascii_lowercase())
@@ -219,10 +217,13 @@ fn alphanumeric(run: &[u8]) -> usize {
     if switches * 3 > len {
         // Random-looking mixed case (base64, keys) is close to one token per letter.
         (len * 9).div_ceil(10)
-    } else if vowels * 5 < len {
-        (len * 2).div_ceil(3)
+    } else if vowels * 5 < len || len > 16 {
+        // Consonant-heavy or long unbroken runs (romanized names, random ids)
+        // split into short pieces.
+        (len * 4).div_ceil(5).max(len.div_ceil(4) + 1)
     } else {
-        len.div_ceil(4)
+        // Short words: one or two tokens, rarely more.
+        len.div_ceil(4) + 1
     }
 }
 
@@ -270,8 +271,8 @@ mod tests {
             600,
         );
         assert_eq!(full, "x y");
-        let text = render(lines, 40);
-        assert!(estimate(&text) <= 40, "{text}");
+        let text = render(lines, 60);
+        assert!(estimate(&text) <= 60, "{text}");
         assert!(text.starts_with("os=macos/aarch64 exec=native"), "{text}");
         assert!(text.contains("harness=pi process_linked"), "{text}");
         assert!(text.contains("omitted="), "{text}");

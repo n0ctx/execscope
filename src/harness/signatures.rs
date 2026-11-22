@@ -1124,6 +1124,10 @@ fn gemini_trust(x: &mut Extraction<'_>) -> Option<bool> {
     let mut trusted = None;
     for (entry, value) in folders.iter().take(config::MAX_DIR_ENTRIES * 4) {
         let entry = Path::new(entry);
+        // An empty or relative entry is a prefix of every path; it grants nothing.
+        if !entry.is_absolute() {
+            continue;
+        }
         match value.as_str() {
             Some("DO_NOT_TRUST") if keys.iter().any(|k| Path::new(k) == entry) => {
                 return Some(false);

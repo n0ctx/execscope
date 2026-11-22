@@ -27,7 +27,8 @@ pub(crate) struct Ancestry {
     pub(crate) chain: Vec<Ancestor>,
     /// The platform offered no readable process table (for example, no `/proc`).
     pub(crate) unavailable: bool,
-    /// The walk stopped at an unreadable ancestor (for example, `/proc` hidepid).
+    /// The walk stopped before the root: an unreadable ancestor (for example,
+    /// `/proc` hidepid), a parent outside a PID namespace, or the depth cap.
     pub(crate) incomplete: bool,
 }
 
@@ -43,16 +44,27 @@ pub(crate) fn ancestry() -> Ancestry {
     let mut chain = Vec::new();
     let mut pid = unsafe { libc::getppid() };
     let mut args = vec![0u8; mac_argmax()];
+    let mut incomplete = false;
     // PID 1 is included: inside a container a harness can be the init process.
-    while pid >= 1 && chain.len() < MAX_ANCESTORS {
+    while pid >= 1 {
+        if chain.len() == MAX_ANCESTORS {
+            incomplete = true;
+            break;
+        }
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
         let read = unsafe {
             libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
         };
-        if read != size {
+        // `proc_pidinfo` refuses processes of other users (such as root-owned `login`
+        // in every Terminal session); `KERN_PROC_PID` still gives their parent.
+        let Some(ppid) = (read == size)
+            .then_some(info.pbi_ppid as libc::pid_t)
+            .or_else(|| mac_ppid(pid))
+        else {
+            incomplete = !chain.is_empty();
             break;
-        }
+        };
         let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
         let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
         let exe = (len > 0)
@@ -68,13 +80,39 @@ pub(crate) fn ancestry() -> Ancestry {
         if pid == 1 {
             break;
         }
-        pid = info.pbi_ppid as libc::pid_t;
+        pid = ppid;
     }
     Ancestry {
         unavailable: chain.is_empty() && unsafe { libc::getppid() } > 1,
-        incomplete: false,
+        incomplete,
         chain,
     }
+}
+
+/// Parent id from `KERN_PROC_PID`. libc does not bind Darwin's `kinfo_proc`, so the
+/// field is read at its fixed offset; the reply length guards the layout.
+#[cfg(target_os = "macos")]
+fn mac_ppid(pid: libc::pid_t) -> Option<libc::pid_t> {
+    const KINFO_PROC_SIZE: usize = 648;
+    const E_PPID_OFFSET: usize = 560;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    let mut buf = [0u8; KINFO_PROC_SIZE];
+    let mut len = buf.len();
+    let ok = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    if !ok || len != KINFO_PROC_SIZE {
+        return None;
+    }
+    let bytes = buf.get(E_PPID_OFFSET..E_PPID_OFFSET + 4)?;
+    Some(libc::pid_t::from_ne_bytes(bytes.try_into().ok()?))
 }
 
 /// `KERN_ARGMAX` bounds a process's argument and environment area.
@@ -156,10 +194,15 @@ pub(crate) fn ancestry() -> Ancestry {
         };
     }
     let mut chain = Vec::new();
-    let mut incomplete = false;
     let mut pid = i64::from(std::os::unix::process::parent_id());
+    // A parent outside this PID namespace shows as 0.
+    let mut incomplete = pid == 0;
     // PID 1 is included: inside a container a harness can be the init process.
-    while pid >= 1 && chain.len() < MAX_ANCESTORS {
+    while pid >= 1 {
+        if chain.len() == MAX_ANCESTORS {
+            incomplete = true;
+            break;
+        }
         let dir = proc.join(pid.to_string());
         let Some(ppid) = crate::safe::read(&dir.join("stat"), 4096)
             .as_deref()
@@ -170,6 +213,7 @@ pub(crate) fn ancestry() -> Ancestry {
         };
         let exe = std::fs::read_link(dir.join("exe"))
             .ok()
+            .map(without_deleted_suffix)
             .filter(|p| p.is_absolute());
         let args = std::fs::File::open(dir.join("cmdline"))
             .ok()
@@ -192,12 +236,26 @@ pub(crate) fn ancestry() -> Ancestry {
         if pid == 1 {
             break;
         }
+        if ppid == 0 {
+            incomplete = true;
+            break;
+        }
         pid = ppid;
     }
     Ancestry {
         unavailable: false,
         incomplete,
         chain,
+    }
+}
+
+/// The kernel marks a replaced or removed executable as `<path> (deleted)`; an updated
+/// interpreter is still the same interpreter.
+#[cfg(any(target_os = "linux", test))]
+fn without_deleted_suffix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|p| p.strip_suffix(" (deleted)")) {
+        Some(stripped) => PathBuf::from(stripped),
+        None => path,
     }
 }
 
@@ -266,14 +324,19 @@ pub(crate) fn ancestry() -> Ancestry {
     let mut chain = Vec::new();
     let mut child = unsafe { GetCurrentProcessId() };
     let mut child_time = created(child).map_or(u64::MAX, |(t, _)| t);
-    while chain.len() < MAX_ANCESTORS {
-        let Some(&parent) = parents.get(&child) else {
-            break;
-        };
+    let mut incomplete = false;
+    // A parent that already exited (absent, or its id reused by a newer process) ends
+    // the chain; one that exists but cannot be opened leaves it incomplete.
+    while let Some(&parent) = parents.get(&child) {
         if parent == 0 || parent == child {
             break;
         }
+        if chain.len() == MAX_ANCESTORS {
+            incomplete = true;
+            break;
+        }
         let Some((time, exe)) = created(parent) else {
+            incomplete = true;
             break;
         };
         if time > child_time {
@@ -285,7 +348,7 @@ pub(crate) fn ancestry() -> Ancestry {
     }
     Ancestry {
         unavailable: false,
-        incomplete: false,
+        incomplete,
         chain,
     }
 }
@@ -311,6 +374,23 @@ mod tests {
         assert!(parse_procargs2(b"\x01").is_empty());
         assert_eq!(linux_ppid("123 (a) b) c) S 456 1 1"), Some(456));
         assert_eq!(linux_ppid("garbage"), None);
+        assert_eq!(
+            without_deleted_suffix(PathBuf::from("/usr/bin/node (deleted)")),
+            PathBuf::from("/usr/bin/node")
+        );
+        assert_eq!(
+            without_deleted_suffix(PathBuf::from("/usr/bin/node")),
+            PathBuf::from("/usr/bin/node")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_parent_lookup_matches_the_os() {
+        let me = std::process::id() as libc::pid_t;
+        assert_eq!(mac_ppid(me), Some(unsafe { libc::getppid() }));
+        assert_eq!(mac_ppid(1), Some(0));
+        assert_eq!(mac_ppid(i32::MAX), None);
     }
 
     #[test]

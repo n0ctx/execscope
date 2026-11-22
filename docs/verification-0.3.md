@@ -6,7 +6,7 @@ This record covers the harness-awareness and brief-budget changes on top of the 
 
 | Target | Checked | Still unverified |
 | --- | --- | --- |
-| Apple Silicon macOS (macOS 27.2) | `cargo fmt --check` and `cargo clippy -D warnings`. 83/83 Rust tests: 49 harness tests (43 fixture cases, 6 reader and ancestry tests), plus brief, parser and validation tests. Release build. `tests/protocol.py` on both MCP lifecycles. `tests/token_calibration.py` on real briefs. Live inspection under a real Claude Code session. | Other macOS versions |
+| Apple Silicon macOS (macOS 27.2) | `cargo fmt --check` and `cargo clippy -D warnings`. 89/89 Rust tests: 54 harness tests (44 fixture cases, 10 reader and ancestry tests), plus brief, parser, tool-selection and validation tests. Release build. `tests/protocol.py` on both MCP lifecycles. `tests/token_calibration.py` on real briefs. Live inspection under a real Claude Code session. | Other macOS versions |
 | Windows x64 | `cargo clippy --all-targets -D warnings` cross-check for `x86_64-pc-windows-msvc`, including the Toolhelp/`QueryFullProcessImageNameW` ancestry code and tests | Execution on Windows: ancestry, PID-reuse guard, `%LOCALAPPDATA%` roots |
 | Linux x64 | `cargo clippy --all-targets -D warnings` cross-check for `x86_64-unknown-linux-gnu`. The C dependency headers were stubbed for type-checking only, nothing was linked. The `/proc` stat and cmdline parsers are unit-tested on macOS. | Execution on Linux, containers, missing `/proc` |
 | Intel macOS, Linux ARM64 | Not rebuilt for this change | Everything |
@@ -31,7 +31,7 @@ Cross-cutting cases:
 - candidate cap and determinism;
 - hostile names and secret filtering;
 - the 100/600/3000 brief budgets;
-- regressions from an independent code review: PyYAML-style lists, YAML 1.1 booleans and flow maps, restrictions from an untrusted project, the home directory as a project, paths and SSH remotes in declared names, case-sensitive executable names on Windows, Windows trust-record keys, Gemini `TRUST_PARENT`/`DO_NOT_TRUST`, Claude trust on an enclosing project, and OpenClaw agent-list ids.
+- regressions from two independent code reviews: PyYAML-style lists, YAML 1.1 booleans, nested and quoted flow collections, `-   key` and `key:<TAB>value` spacing, restrictions from an untrusted project, the home directory as a project, paths, SSH remotes, e-mail addresses and key-shaped text in declared names, case-sensitive executable names on Windows, Windows trust-record keys, Gemini `TRUST_PARENT`/`DO_NOT_TRUST` and relative entries, Claude trust on an enclosing project, project-over-user precedence for disabled flags, JSON5 numbers, and OpenClaw agent-list ids.
 
 A test-only fictional signature (`a_new_product_needs_only_a_signature_row`) shows that a new product needs only a table row, with no new module, schema change or connector.
 
@@ -48,35 +48,37 @@ declared_subagents=5 Explore,<agent-a>,<agent-b>
 limits=permission_mode=auto
 ```
 
+The macOS ancestry walk reads parents of other users' processes through `KERN_PROC_PID`, because `proc_pidinfo` refuses the root-owned `login` that every Terminal session runs under. Live, the chain now reaches Terminal and launchd, and no `process_ancestry_incomplete` note appears.
+
 `--scope harness` also listed Codex, Copilot CLI, Grok Build, Hermes, Kimi Code, legacy kimi-cli, Pi and WorkBuddy as `configured`. These are real installs on this machine. Cursor, ZCode, OpenCode, OpenClaw, Gemini CLI, Antigravity and DeepSeek Harness are not installed here or on the second test Mac. Their rows rest on official documentation and released source, and are covered only by fixtures.
 
 ## Brief budget calibration
 
-`tests/fixtures/token_calibration.in` holds 34 strings with reference counts from tiktoken 0.14: report lines, hashes, UUIDs, base64, CJK including rare blocks, Devanagari, Ethiopic, Thai, symbols, emoji and 300-character fields. The Rust test requires the estimate to be at or above both `o200k_base` and `cl100k_base` for every row.
+`tests/fixtures/token_calibration.in` holds 39 strings with reference counts from tiktoken 0.14: report lines, hashes, UUIDs, base64, CJK including rare blocks, Devanagari, Ethiopic, Thai, symbols, emoji, space-separated digits, romanized names and 300-character fields. The Rust test requires the estimate to be at or above both `o200k_base` and `cl100k_base` for every row.
 
 Real briefs from the release binary, measured with tiktoken. The table shows the maximum of the two encodings.
 
 | Scope | Budget 100 | Budget 600 | Budget 3000 |
 | --- | --- | --- | --- |
-| auto | 61 | 218 | 269 |
-| harness | 61 | 284 | 284 |
-| all (with `--requires git,node,cargo`) | 61 | 382 | 495 |
+| auto | 50 | 231 | 282 |
+| harness | 50 | 284 | 284 |
+| all | 50 | 299 | 495 |
 
-At the default budget a brief lists at most three declared names of each kind; from 1,200 tokens, or with `scope=harness`/`all`, it lists every bounded name. Briefs are not padded: budgets above the available evidence produce the same text.
+At the default budget a brief lists at most three declared names of each kind; from 1,200 tokens, or with `scope=harness`/`all`, it lists every bounded name. Briefs are not padded: budgets above the available evidence produce the same text. On real briefs the estimate runs about twice the reference count, which keeps it at or above the reference for romanized names and rare characters. Random letter strings can still come out a little above the estimate.
 
 ## Performance and size (same machine, alternating runs, n=30, medians)
 
 | Measurement | 0.2.0 baseline | 0.3.0 |
 | --- | --- | --- |
-| CLI cold `auto` brief | 9.74 / 9.97 ms | 10.09 / 10.09 ms |
-| MCP cold `auto` brief | 6.42 / 6.41 ms | 6.44 / 6.48 ms |
-| MCP warm `auto` brief | 2.23 / 2.23 ms | 2.35 / 2.33 ms |
-| MCP `all` full, refresh | 65.3 / 65.2 ms | 66.7 / 66.8 ms |
-| MCP `harness` brief | n/a | 3.38 / 3.31 ms |
-| Release binary (aarch64, stripped) | 6,509,216 B | 6,742,256 B (+3.6%) |
-| Peak RSS, CLI `auto` | 10.1 MB | 11.5 MB |
+| CLI cold `auto` brief | 10.08 / 9.90 ms | 67.0 / 68.6 ms |
+| MCP cold `auto` brief | 6.39 / 6.42 ms | 63.2 / 65.5 ms |
+| MCP warm `auto` brief | 2.28 / 2.26 ms | 2.55 / 2.61 ms |
+| MCP `all` full, refresh | 65.5 / 69.0 ms | 66.9 / 67.1 ms |
+| MCP `harness` brief | n/a | 3.66 / 3.57 ms |
+| Release binary (aarch64, stripped) | 6,509,216 B | 6,758,768 B (+3.8%) |
+| Peak RSS, CLI `auto` | 10.1 MB | 11.6 MB without the node probe; 19.9 MB with it |
 
-The incremental median for `auto` is under 0.4 ms, well inside the 100 ms target. The MCP `auto` brief grew from 86 to 207 o200k tokens on this machine because it now carries the linked harness. A full `all` report grew from 6,891 to 10,080 tokens. The tool definition stays below 2.6 KB of JSON, and the protocol test enforces that limit.
+Harness collection adds under 0.4 ms to the `auto` median: a 0.3.0 build without the default tools measured 10.09 ms cold and 2.35 ms warm. The cold `auto` rows grew by about 57 ms because `auto` and `dev` now resolve git, node and python in every directory, and `node --version` alone takes 59 ms with Node.js 26.13. Warm MCP calls reuse the 30-second probe cache. The 19.9 MB peak is the `node --version` child, which macOS counts in its parent's peak; ExecScope's own peak is unchanged. Both cold rows stay inside the 100 ms target. The MCP `auto` brief grew from 86 to 227 o200k tokens on this machine because it now carries the linked harness and the three default tools. A full `all` report grew from 6,891 to 10,080 tokens. The tool definition stays below 2.6 KB of JSON, and the protocol test enforces that limit.
 
 ## Known limits
 

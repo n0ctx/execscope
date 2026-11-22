@@ -80,7 +80,11 @@ fn relaxed_json(text: &str) -> Option<String> {
                         '\\' => {
                             let next = *chars.get(i)?;
                             i += 1;
-                            if next == '\'' {
+                            // A backslash before a line break continues the string.
+                            if next == '\r' && chars.get(i) == Some(&'\n') {
+                                i += 1;
+                            } else if next == '\n' || next == '\r' {
+                            } else if next == '\'' {
                                 out.push('\'');
                             } else {
                                 out.push('\\');
@@ -168,11 +172,64 @@ fn relaxed_json(text: &str) -> Option<String> {
                 key_position = false;
                 continue;
             }
+            c if !key_position && (c.is_ascii_digit() || matches!(c, '+' | '-' | '.')) => {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '+' | '-' | '.'))
+                {
+                    i += 1;
+                }
+                let token: String = chars[start..i].iter().collect();
+                out.push_str(&json5_number(&token).unwrap_or(token));
+                continue;
+            }
+            c if !key_position && c.is_ascii_alphabetic() => {
+                let start = i;
+                while i < chars.len() && chars[i].is_ascii_alphanumeric() {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                // Strict JSON has no infinities or NaN; their values are never needed.
+                out.push_str(if matches!(word.as_str(), "Infinity" | "NaN") {
+                    "null"
+                } else {
+                    &word
+                });
+                continue;
+            }
             c => out.push(c),
         }
         i += 1;
     }
     Some(out)
+}
+
+/// JSON5 number spellings that strict JSON lacks: a leading `+`, a leading or
+/// trailing `.`, hexadecimal, and signed infinities or NaN.
+fn json5_number(token: &str) -> Option<String> {
+    let (sign, body) = match token.as_bytes().first()? {
+        b'+' => ("", &token[1..]),
+        b'-' => ("-", &token[1..]),
+        _ => ("", token),
+    };
+    if matches!(body, "Infinity" | "NaN") {
+        return Some("null".into());
+    }
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16)
+            .ok()
+            .map(|n| format!("{sign}{n}"));
+    }
+    let body = if body.starts_with('.') {
+        format!("0{body}")
+    } else {
+        body.to_owned()
+    };
+    let body = match body.strip_suffix('.') {
+        Some(whole) => whole.to_owned(),
+        None => body.replace(".e", ".0e").replace(".E", ".0E"),
+    };
+    Some(format!("{sign}{body}"))
 }
 
 /// Minimal YAML reader for configuration metadata. Anything outside the subset
@@ -185,38 +242,25 @@ fn yaml(text: &str) -> Option<Value> {
     }
     fn scalar(raw: &str) -> Value {
         let raw = strip_comment(raw).trim();
-        if raw.starts_with('[') && raw.ends_with(']') {
-            return Value::Array(
-                raw[1..raw.len() - 1]
-                    .split(',')
-                    .map(|s| unquote(s.trim()))
-                    .filter(|s| !s.is_empty())
-                    .map(Value::String)
-                    .collect(),
-            );
+        if raw.starts_with(['[', '{']) {
+            // A flow collection that does not parse completely is not guessed.
+            return flow(raw).unwrap_or(Value::Null);
         }
-        if raw.starts_with('{') && raw.ends_with('}') {
-            let inner = &raw[1..raw.len() - 1];
-            // Single-level flow mappings only; nested flow syntax is not guessed.
-            if inner.contains(['{', '[']) {
-                return Value::Null;
-            }
-            let mut map = Map::new();
-            for pair in inner.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-                let Some((key, value)) = pair.split_once(':') else {
-                    return Value::Null;
-                };
-                map.insert(unquote(key), scalar(value));
-            }
-            return Value::Object(map);
+        if raw.starts_with(['"', '\'']) {
+            return Value::String(unquote(raw));
         }
-        // YAML 1.1 and 1.2 boolean spellings.
-        match raw.to_ascii_lowercase().as_str() {
-            "true" | "yes" | "on" => Value::Bool(true),
-            "false" | "no" | "off" => Value::Bool(false),
-            "null" | "~" | "" => Value::Null,
-            _ => Value::String(unquote(raw)),
-        }
+        plain(raw)
+    }
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#') && *l != "---");
+    if first.is_some_and(|l| l.starts_with(['{', '['])) {
+        let body: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && l.trim() != "---")
+            .collect();
+        return flow(&body.join("\n"));
     }
     fn strip_comment(raw: &str) -> &str {
         let mut quote = None;
@@ -279,12 +323,14 @@ fn yaml(text: &str) -> Option<Value> {
             attach(stack.last_mut()?, done.value);
         }
         let (item, body) = if let Some(rest) = trimmed.strip_prefix("- ") {
-            (true, rest)
+            (true, rest.trim_start())
         } else if trimmed == "-" {
             (true, "")
         } else {
             (false, trimmed)
         };
+        // Keys of a mapping inside a list item align with the item's first key.
+        let child_indent = indent + (trimmed.len() - body.len()).max(2);
         // A document whose first entry is a list item is a root-level list.
         let root_only = stack.len() == 1;
         let top = stack.last_mut()?;
@@ -315,14 +361,14 @@ fn yaml(text: &str) -> Option<Value> {
                     let mut map = Map::new();
                     map.insert(key, scalar(rest));
                     stack.push(Frame {
-                        indent: indent + 2,
+                        indent: child_indent,
                         value: Value::Object(map),
                         key: None,
                     });
                 }
                 Some((key, _)) => {
                     stack.push(Frame {
-                        indent: indent + 2,
+                        indent: child_indent,
                         value: Value::Object(Map::new()),
                         key: Some(key),
                     });
@@ -389,6 +435,118 @@ fn yaml(text: &str) -> Option<Value> {
     Some(root.value)
 }
 
+/// An unquoted YAML scalar: YAML 1.1 and 1.2 boolean and null spellings, else a string.
+fn plain(raw: &str) -> Value {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => Value::Bool(true),
+        "false" | "no" | "off" => Value::Bool(false),
+        "null" | "~" | "" => Value::Null,
+        _ => Value::String(raw.to_owned()),
+    }
+}
+
+/// A complete YAML flow collection (`{a: 1, b: [x, "y,z"]}`), nested up to 32 levels.
+fn flow(text: &str) -> Option<Value> {
+    struct Parser<'a> {
+        chars: std::iter::Peekable<std::str::Chars<'a>>,
+        depth: usize,
+    }
+    impl Parser<'_> {
+        fn skip_space(&mut self) {
+            while self.chars.next_if(|c| c.is_whitespace()).is_some() {}
+        }
+        fn value(&mut self) -> Option<Value> {
+            self.skip_space();
+            match self.chars.peek()? {
+                '{' | '[' if self.depth < 32 => {
+                    let open = self.chars.next()?;
+                    self.depth += 1;
+                    let value = if open == '{' { self.map() } else { self.list() };
+                    self.depth -= 1;
+                    value
+                }
+                '"' | '\'' => self.quoted().map(Value::String),
+                _ => Some(plain(self.plain_text(false).trim())),
+            }
+        }
+        fn quoted(&mut self) -> Option<String> {
+            let quote = self.chars.next()?;
+            let mut out = String::new();
+            loop {
+                match self.chars.next()? {
+                    '\'' if quote == '\'' && self.chars.next_if_eq(&'\'').is_some() => {
+                        out.push('\'')
+                    }
+                    '\\' if quote == '"' => out.push(self.chars.next()?),
+                    c if c == quote => return Some(out),
+                    c => out.push(c),
+                }
+            }
+        }
+        /// Plain text up to a flow indicator; a key also stops at `: `.
+        fn plain_text(&mut self, key: bool) -> String {
+            let mut out = String::new();
+            while let Some(&c) = self.chars.peek() {
+                if matches!(c, ',' | ']' | '}') || (key && c == ':') {
+                    break;
+                }
+                out.push(c);
+                self.chars.next();
+            }
+            out
+        }
+        fn list(&mut self) -> Option<Value> {
+            let mut items = Vec::new();
+            loop {
+                self.skip_space();
+                if self.chars.next_if_eq(&']').is_some() {
+                    return Some(Value::Array(items));
+                }
+                items.push(self.value()?);
+                self.skip_space();
+                match self.chars.next()? {
+                    ',' => {}
+                    ']' => return Some(Value::Array(items)),
+                    _ => return None,
+                }
+            }
+        }
+        fn map(&mut self) -> Option<Value> {
+            let mut map = Map::new();
+            loop {
+                self.skip_space();
+                if self.chars.next_if_eq(&'}').is_some() {
+                    return Some(Value::Object(map));
+                }
+                let key = match self.chars.peek()? {
+                    '"' | '\'' => self.quoted()?,
+                    _ => self.plain_text(true).trim().to_owned(),
+                };
+                self.skip_space();
+                let value = if self.chars.next_if_eq(&':').is_some() {
+                    self.value()?
+                } else {
+                    Value::Null
+                };
+                map.insert(key, value);
+                self.skip_space();
+                match self.chars.next()? {
+                    ',' => {}
+                    '}' => return Some(Value::Object(map)),
+                    _ => return None,
+                }
+            }
+        }
+    }
+    let mut parser = Parser {
+        chars: text.trim().chars().peekable(),
+        depth: 0,
+    };
+    let value = parser.value()?;
+    parser.skip_space();
+    parser.chars.peek().is_none().then_some(value)
+}
+
 fn split_key(body: &str) -> Option<(String, &str)> {
     let (key, rest) = if body.starts_with('"') || body.starts_with('\'') {
         let quote = body.chars().next()?;
@@ -398,6 +556,9 @@ fn split_key(body: &str) -> Option<(String, &str)> {
     } else {
         let colon = body
             .find(": ")
+            .into_iter()
+            .chain(body.find(":\t"))
+            .min()
             .or_else(|| body.strip_suffix(':').map(str::len))?;
         let key = &body[..colon];
         if key.contains(['{', '[', '#']) {
@@ -442,13 +603,11 @@ pub(crate) struct Names {
 }
 
 impl Names {
+    /// The first declaration of a name wins, so callers add sources in precedence
+    /// order: a project's `enabled: true` is not undone by a user-level `false`.
     fn add(&mut self, name: &str, disabled: bool) {
         match safe::identifier(name, 64) {
-            Some(name) if self.names.contains(&name) => {
-                if disabled && !self.disabled.contains(&name) {
-                    self.disabled.push(name);
-                }
-            }
+            Some(name) if self.names.contains(&name) => {}
             Some(name) => {
                 if disabled {
                     self.disabled.push(name.clone());
@@ -686,6 +845,54 @@ mod tests {
         assert_eq!(v["mcp_servers"]["docs"]["args"], json!(["-y", "pkg"]));
         assert_eq!(declared(&v["mcp_servers"]).disabled, ["b", "c", "docs"]);
         assert_eq!(v["approvals"]["mode"], "manual");
+    }
+
+    #[test]
+    fn yaml_flow_collections_and_spacing_variants() {
+        let text = "servers:\n  a: {command: \"x,y\", enabled: false}\n  b: {command: x, args: [a, 'b, c'], env: {K: v}, enabled: off}\n  c: {}\nagents:\n-   name: helper\n    enabled: false\n-   name: other\nmodel:\tm\n";
+        let v = parse(text, Format::Yaml).unwrap();
+        assert_eq!(v["servers"]["a"]["command"], "x,y");
+        assert_eq!(v["servers"]["b"]["args"], json!(["a", "b, c"]));
+        assert_eq!(declared(&v["servers"]).disabled, ["a", "b"]);
+        assert_eq!(v["agents"][0]["enabled"], false);
+        assert_eq!(declared(&v["agents"]).names, ["helper", "other"]);
+        assert_eq!(v["model"], "m");
+        let top = parse("# c\n{a: 1, b: [x, {c: on}]}\n", Format::Yaml).unwrap();
+        assert_eq!(top, json!({"a": "1", "b": ["x", {"c": true}]}));
+        // Unbalanced flow syntax is not guessed.
+        assert_eq!(
+            parse("a: {b: [1}\n", Format::Yaml).unwrap()["a"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn json5_numbers_and_line_continuations() {
+        let v = parse(
+            "{a: +1, b: .5, c: 5., d: 0x10, e: -Infinity, f: NaN, g: 'one \\\ntwo', h: [1e3, -2.5E-1]}",
+            Format::Json,
+        )
+        .unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 0.5);
+        assert_eq!(v["c"], 5);
+        assert_eq!(v["d"], 16);
+        assert_eq!(v["e"], Value::Null);
+        assert_eq!(v["f"], Value::Null);
+        assert_eq!(v["g"], "one two");
+        assert_eq!(v["h"], json!([1000.0, -0.25]));
+    }
+
+    #[test]
+    fn first_declaration_of_a_name_wins() {
+        let mut project = Names::default();
+        project.add("docs", false);
+        let mut user = Names::default();
+        user.add("docs", true);
+        user.add("web", true);
+        project.merge(user);
+        assert_eq!(project.names, ["docs", "web"]);
+        assert_eq!(project.disabled, ["web"]);
     }
 
     #[test]

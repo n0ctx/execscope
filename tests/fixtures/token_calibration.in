@@ -34,4 +34,9 @@
     ("\u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940} \u{915}\u{94c}\u{936}\u{932} \u{938}\u{92e}\u{940}\u{915}\u{94d}\u{937}\u{93e} \u{1230}\u{120b}\u{121d} \u{12d3}\u{1208}\u{121d} \u{1275}\u{130d}\u{122d}\u{129b}", 29, 49),
     ("\u{e44}\u{e17}\u{e22} \u{e20}\u{e32}\u{e29}\u{e32} \u{e17}\u{e31}\u{e01}\u{e29}\u{e30} \u{2018}quoted\u{2019} \u{2014} ellipsis\u{2026} \u{2122} \u{2713} \u{2192} \u{26a0}", 17, 31),
     ("\u{32ff} \u{3299} \u{fe4f} \u{a66e} \u{a9b2}\u{a98f} \u{16a0}\u{16a2}\u{16a6} \u{2801}\u{2803} \u{216b}\u{2163}", 40, 38),
+    ("x 1 2 3 4 5 6 7 8 9 10 11 12", 25, 25),
+    ("sampled 2026 11 22 cores 8 mem 16 GiB", 17, 17),
+    ("kimi xiangqi zhongwen yunzhiwang \u{9b51}\u{9b45}\u{9b4d}\u{9b49}", 19, 25),
+    ("declared_skills=9 guanli-gongju,touzi-fenxi,caiwu-baobiao,huiyi-jilu,wenjian-zhengli,shuju-qingxi,kehu-genzong,xiangmu-guanli,renwu-paidui", 59, 62),
+    ("cyrszkkwltpszoccipwvcbxwjusvojwmvlaolftdpbgyjexhmmqowerplkjh", 32, 33),
 ]

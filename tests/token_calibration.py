@@ -50,6 +50,11 @@ CORPUS = [
     "हिन्दी कौशल समीक्षा ሰላም ዓለም ትግርኛ",
     "ไทย ภาษา ทักษะ ‘quoted’ — ellipsis… ™ ✓ → ⚠",
     "㋿ ㊙ ﹏ ꙮ ꦲꦏ ᚠᚢᚦ ⠁⠃ ⅫⅣ",
+    "x 1 2 3 4 5 6 7 8 9 10 11 12",
+    "sampled 2026 11 22 cores 8 mem 16 GiB",
+    "kimi xiangqi zhongwen yunzhiwang 魑魅魍魉",
+    "declared_skills=9 guanli-gongju,touzi-fenxi,caiwu-baobiao,huiyi-jilu,wenjian-zhengli,shuju-qingxi,kehu-genzong,xiangmu-guanli,renwu-paidui",
+    "cyrszkkwltpszoccipwvcbxwjusvojwmvlaolftdpbgyjexhmmqowerplkjh",
 ]
 
 
